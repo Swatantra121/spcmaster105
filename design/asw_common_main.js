@@ -10668,7 +10668,9 @@ async function create_scene(p_module_index, p_new_item_label, p_show_item_desc, 
                             if (shelfs.ObjType == "TEXTBOX") {
                                 shelfZ = g_world.getObjectById(shelfs.SObjID).position.z; //shelfs.Z > 0.0021 ? 0.0021 : shelfs.Z == 0 ? 0.0006 : shelfs.Z;   //ASA-1652 #10
                             } else if (shelfs.ObjType == "PEGBOARD") {
-                                shelfZ = 0.003;
+                                // shelfZ = 0.003;
+                                shelfZ = g_world.getObjectById(shelfs.SObjID).position.z; // ASA-2079 Task 2
+ 
                             } else {
                                 if (isShelfOnPegboard(shelfs.X, shelfs.Y, p_module_index, p_pog_index, shelfs, g_pog_json)) {
                                     shelfZ = 0.005;
