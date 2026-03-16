@@ -105,12 +105,24 @@ function validate_data() {
 	var duplicate_ind = "N";
 	try {
 		if (l_modalinfo[0].ModNames.length > 0) {
-			for (const modnames of l_modalinfo[0].ModNames) {
-				if (POGModule.toUpperCase().trim() === modnames.toUpperCase().trim()) {
-					duplicate_ind = "Y";
-				}
-			}
-		}
+            //ASA-2071
+            // for (const modnames of l_modalinfo[0].ModNames) {
+            // 	if (POGModule.toUpperCase().trim() === modnames.toUpperCase().trim()) {
+            // 		duplicate_ind = "Y";
+            // 	}
+            // }
+            for (const modnames of l_modalinfo[0].ModNames) 
+            {
+                if ($v("P25_POG_MODULE_NAME_TYPE") == "A" ? 
+                    String(POGModule).trim().toUpperCase() === String(modnames).trim().toUpperCase() : 
+                    String(POGModule).trim() === String(modnames).trim()) 
+                    {
+                        duplicate_ind = "Y";
+                        break;
+                    }
+            }
+        }
+        //ASA-2071 End
 
         //ASA-1694 #17 added condition $v('P441_NEW_TEMPLATE') != 'Y'
 		if ($v("P441_POG_MODULE") == "" || ($v("P441_SUBDEPT") == "" && $v('P441_NEW_TEMPLATE') != 'Y') || $v("P441_POG_MODULE_HEIGHT") == "" || $v("P441_POG_MODULE_WIDTH") == "" || $v("P441_POG_MODULE_DEPTH") == "" || $v("P441_MODULE_COLOR") == "") {

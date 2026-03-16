@@ -93,6 +93,16 @@
     border: 1px solid #ffffff; 
     color: #ffffff;
 }
+.disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    filter: grayscale(100%);
+}
+
+.disabled a, .disabled button {
+    pointer-events: none; /* Secondary layer of protection */
+    color: #999 !important;
+}
 .wtbar {
     background-color: rgb(0 132 209);
     color: white;
@@ -144,9 +154,16 @@
    font-size: 12px;
    margin-right: 8px;
 }
+.wt-right .disable{
+    opacity: 0.8;
+    pointer-events: none;
+}
 /**** Side Bar CSS ***/
 #wpdSplitter_splitter_first{
     overflow: scroll;
+}
+#P193_DATA_inline_help{
+    max-width: 100% !important;
 }
 #selection {
     position: absolute;
@@ -243,12 +260,16 @@
     color: #000;
     border-radius: 10px;
 }
-#wpdSplitter_splitter_first .t-Form-inlineHelp span {
-    display: block;
+#wpdSplitter_splitter_first .t-Form-inlineHelp span#P193_DATA_inline_help {
+    display: flex;
     color: #4a5565;
     font-size: 14px;
-    max-width: 200px;
     line-height: 1.4;
+    justify-content: space-between;
+    align-items: flex-start;
+}
+#wpdSplitter_splitter_first .t-Form-inlineHelp .help_msg{
+    max-width: 200px;
 }
 #wpdSplitter_splitter_first  .recalculate-btn .t-Button{
     border-radius: 8px;
@@ -372,4 +393,17 @@
 }
 div#drawing_region {
     margin: 0 -10px;
+}
+canvas#analysisChart_1 {
+    transform: scale(0.75);
+}
+.analysis-panel-content{
+    padding: 40px;
+    height: 100%;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+}
+div#maincanvas2-container {
+    border-left: 1px solid #030213;
 }

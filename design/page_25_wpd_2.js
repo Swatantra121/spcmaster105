@@ -415,7 +415,7 @@ function set_item_after_drag(p_new_object_type, p_spread_product, p_new_module_i
         if (p_new_object_type == "PEGBOARD" || (p_new_object_type == "CHEST" && g_chest_as_pegboard == "Y")) {
             g_pog_json[p_pog_index].ModuleInfo[p_new_module_index].ShelfInfo[p_new_shelf_index].ItemInfo.push(p_itemInfo);
             l_edited_item_index = g_pog_json[p_pog_index].ModuleInfo[p_new_module_index].ShelfInfo[p_new_shelf_index].ItemInfo.length - 1;
-        } 
+        }
         else {
             g_pog_json[p_pog_index].ModuleInfo[p_new_module_index].ShelfInfo[p_new_shelf_index].ItemInfo.splice(p_upd_item_index, 0, p_itemInfo);
             l_edited_item_index = p_upd_item_index;
@@ -1507,7 +1507,7 @@ function doMouseDown(p_x, p_y, p_startX, p_startY, p_event, p_canvas, p_context_
             //and send all the childrens in the world. which will give you back list of object hit on that position in an array.
             //index 0 object will be the nearest to the mouse and others are behind them.
             new_camera.updateProjectionMatrix();
-            g_raycaster.setFromCamera(new THREE.Vector2(a, b), new_camera);            
+            g_raycaster.setFromCamera(new THREE.Vector2(a, b), new_camera);
             g_intersects = g_raycaster.intersectObjects(new_world.children); // no need for recusion since all objects are top-level
             console.log(g_intersects);
 
@@ -6628,7 +6628,20 @@ async function doMouseUp(p_x, p_y, p_event, p_prevX, p_prevY, p_canvas, p_camera
                                 fitems.CType = g_pog_json[p_pog_index].ModuleInfo[new_module_index].ShelfInfo[new_shelf_index].ObjType;
                                 //ASA_1769, added itemInsidePeg param to not validate holes passing to find_pegboard_gap
                                 var new_x = get_item_xaxis(fitems.W, fitems.H, fitems.D, fitems.CType, -1, g_pog_json[p_pog_index].ModuleInfo[new_module_index].ShelfInfo[new_shelf_index].HorizGap, g_pog_json[p_pog_index].ModuleInfo[new_module_index].ShelfInfo[new_shelf_index].SpreadItem, g_pog_json[p_pog_index].ModuleInfo[new_module_index].ShelfInfo[new_shelf_index].HorizGap, new_module_index, new_shelf_index, itemindex, "Y", g_pog_json[p_pog_index].ModuleInfo[new_module_index].ShelfInfo[new_shelf_index].ItemInfo.length, "N", p_pog_index, itemInsidePeg);
-                                fitems.X = new_x;
+                                if (g_pog_json[p_pog_index].ModuleInfo[new_module_index].ShelfInfo[new_shelf_index].SpreadItem == "R") { // ASA 2066 issue 1  start
+                                    //  var l_hgap_r = g_pog_json[p_pog_index].ModuleInfo[new_module_index].ShelfInfo[new_shelf_index].HorizGap;
+                                    // if (fitems.BHoriz > 1 && fitems.CrushHoriz == 0 && l_hgap_r > 0) {
+                                    //     fitems.W = wpdSetFixed(fitems.RW + l_hgap_r * (fitems.BHoriz - 1));
+                                    // }
+                                    if (itemindex == l_edited_item_index) {
+                                        fitems.X = g_final_x;
+                                    }
+                                } else {
+
+                                    var new_x = get_item_xaxis(fitems.W, fitems.H, fitems.D, fitems.CType, -1, g_pog_json[p_pog_index].ModuleInfo[new_module_index].ShelfInfo[new_shelf_index].HorizGap, g_pog_json[p_pog_index].ModuleInfo[new_module_index].ShelfInfo[new_shelf_index].SpreadItem, g_pog_json[p_pog_index].ModuleInfo[new_module_index].ShelfInfo[new_shelf_index].HorizGap, new_module_index, new_shelf_index, itemindex, "Y", g_pog_json[p_pog_index].ModuleInfo[new_module_index].ShelfInfo[new_shelf_index].ItemInfo.length, "N", p_pog_index, itemInsidePeg);
+                                    fitems.X = new_x;
+                                }
+                                // ASA 2066 issue 1  End                             
                                 // var item_end = parseFloat((fitems.X + fitems.W / 2).toFixed(4)); //ASA-1286 issue 2  KUSH
                                 /*if (item_end >shefl_end && g_overhung_shelf_active == 'N'){//ASA-1286 issue 2  KUSH//Task-02_25977
                                 l_fixed_item_validate = "Y";
@@ -6672,6 +6685,39 @@ async function doMouseUp(p_x, p_y, p_event, p_prevX, p_prevY, p_canvas, p_camera
                         var drag_item_arr = [];
 
                         var items = g_pog_json[p_pog_index].ModuleInfo[new_module_index].ShelfInfo[new_shelf_index].ItemInfo[l_edited_item_index];
+
+                        // Reduce HorizFacing if available shelf space is insufficient for current BHoriz
+                        // ASA 2066 issue 5  start
+                        let l_old_shelf= g_pog_json[p_pog_index].ModuleInfo[g_module_index].ShelfInfo[g_shelf_index];
+                        let  l_dest_shelf = g_pog_json[p_pog_index].ModuleInfo[new_module_index].ShelfInfo[new_shelf_index];
+                        let l_check_shelf= l_old_shelf.Shelf === l_dest_shelf.Shelf;
+                        let spread_type = g_pog_json[p_pog_index].ModuleInfo[new_module_index].ShelfInfo[new_shelf_index].SpreadItem;
+                        if(!l_check_shelf) { 
+                            if ((spread_type !== "E" ) && g_overhung_shelf_active == "N") {
+                                if ((new_object_type === "SHELF" || new_object_type === "HANGINGBAR") && items.BHoriz > 1 && items.Item !== "DIVIDER") {
+                                    var l_other_items_width = 0;
+                                    for (var l = 0; l < l_dest_shelf.ItemInfo.length; l++) {
+                                        if (l !== l_edited_item_index) l_other_items_width += l_dest_shelf.ItemInfo[l].W;
+                                    }
+                                    var l_horiz_gap = l_dest_shelf.HorizGap || 0;
+                                    // var l_avail_width = wpdSetFixed(l_dest_shelf.W - l_other_items_width);
+                                    var l_avail_width = wpdSetFixed(l_dest_shelf.AvlSpace/100);
+                                    if (l_avail_width < items.W) {
+                                        // RW holds total width of all facings without inter-facing gaps; divide by BHoriz to get one facing width
+                                        var l_single_facing_width = wpdSetFixed(items.RW / items.BHoriz);
+                                        var l_new_horiz_facing = l_horiz_gap > 0
+                                            ? Math.max(1, Math.floor((l_avail_width + l_horiz_gap) / (l_single_facing_width + l_horiz_gap)))
+                                            : Math.max(1, Math.floor(l_avail_width / l_single_facing_width));
+                                        if (l_new_horiz_facing < items.BHoriz) {
+                                            items.BHoriz = l_new_horiz_facing;
+                                            items.RW = wpdSetFixed(l_single_facing_width * l_new_horiz_facing);
+                                            items.W = l_new_horiz_facing > 1 ? wpdSetFixed(items.RW + l_horiz_gap * (l_new_horiz_facing - 1)) : items.RW;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // ASA 2066 issue 5  End
                         item_width_arr.push(wpdSetFixed(items.W));
                         item_height_arr.push(wpdSetFixed(items.H));
                         item_depth_arr.push(wpdSetFixed(items.D));
@@ -7065,7 +7111,7 @@ function rollback_item(p_module_index, p_shelf_index, p_item_index, p_drag_z, p_
 async function update_item_loc(p_curr_module, p_module_index, p_shelf_index, p_div_shelf_index, p_div_object_type, p_item_index, p_final_x, p_shelf_found, p_itemInfo, p_shelfY, p_shelfHeight, p_final_y, p_div_pogjson, p_drag_direction, p_pog_index, p_curr_pogIndex) {
     logDebug("function : update_item_loc; curr_module : " + p_curr_module + "; p_module_index : " + p_module_index + "; p_shelf_index : " + p_shelf_index + "; div_shelf_index : " + p_div_shelf_index + "; div_object_type : " + p_div_object_type + "; i_item_index : " + p_item_index + "; i_final_x : " + p_final_x + "; shelf_found : " + p_shelf_found + "; shelfY : " + p_shelfY + "; shelfHeight : " + p_shelfHeight + "; p_final_y : " + p_final_y + "; drag_direction : " + p_drag_direction, "S");
     try {
-       typeof p_curr_pogIndex == "undefined" ? p_pog_index : p_curr_pogIndex;
+        typeof p_curr_pogIndex == "undefined" ? p_pog_index : p_curr_pogIndex;
         var new_pog_index = -1,
             new_module_index = -1,
             new_shelf_index = -1,
@@ -7299,14 +7345,20 @@ function get_nearest_item(p_module_index, p_shelf_index, p_final_x, p_item_index
                 var index = indices[indices.length - 1];
 
                 if (spread_product == "R") {
-                    if (min_index_arr[index] > 0) {
-                        if (p_drag_direction == "B") {
-                            upd_item_index = min_index_arr[index];
-                        } else {
-                            upd_item_index = min_index_arr[index] - 1;
-                        }
+                    if (p_edit_ind == "N") {
+                        // Cross-shelf: item not yet in target array, insert directly before the nearest right item
+                        upd_item_index = typeof min_index_arr[index] == "undefined" ? 0 : min_index_arr[index];
                     } else {
-                        upd_item_index = 0;
+                        // Same-shelf: dragged item is still in array, adjust for direction
+                        if (min_index_arr[index] > 0) {
+                            if (p_drag_direction == "B") {
+                                upd_item_index = min_index_arr[index];
+                            } else {
+                                upd_item_index = min_index_arr[index] - 1;
+                            }
+                        } else {
+                            upd_item_index = 0;
+                        }
                     }
                 } else {
                     if (p_module_index == p_curr_mod_ind && p_shelf_index == p_curr_shelf_ind) {
@@ -7324,21 +7376,28 @@ function get_nearest_item(p_module_index, p_shelf_index, p_final_x, p_item_index
                     }
                 }
             } else {
-                upd_item_index = 0;
+                // Drop is past all items (no item has its right edge beyond the drop point)
+                if (spread_product == "R") {
+                    // R-spread: drop is to the right of everything → append at the end (rightmost position)
+                    upd_item_index = items_arr.length;
+                } else {
+                    upd_item_index = 0;
+                }
             }
-        } 
-    else {
-            if (p_edit_ind == "N" && spread_product !== "R" && upd_item_index > -1) { // ASA-2066 Issue 2 start
+        }
+        else {
+            if (p_edit_ind == "N" && upd_item_index > -1) { // ASA-2066 Issue 2 start
                 if (p_final_x >= items_arr[upd_item_index].X) {
-                 upd_item_index = upd_item_index + 1;
-            }
-            
+                    upd_item_index = upd_item_index + 1;
+                }
+
             } // ASA-2066 Issue 2 
         }
         logDebug("function : get_nearest_item", "E");
         return [upd_item_index, bottom_item_ind, bottom_item_flag];
     } catch (err) {
         error_handling(err);
+
     }
 }
 
@@ -7488,7 +7547,11 @@ async function open_edit_modal_popup(p_object_ind, p_module_ind, p_shelf_ind, p_
             var i = 0;
             for (const Module of g_pog_json[p_pog_index].ModuleInfo) {
                 if (g_module_index !== i) {
-                    mod_names.push(Module.Module.toUpperCase());
+                    if ($v("P25_POG_MODULE_NAME_TYPE") == "A") { //ASA-2071
+                        mod_names.push(Module.Module.toUpperCase());
+                    } else {
+                        mod_names.push(Module.Module);
+                    }
                 }
                 i++;
             }
@@ -8347,7 +8410,12 @@ function open_modal(p_bar_class, p_icon_class, p_modal_id) {
         if (typeof g_pog_json !== "undefined" && g_pog_json.length > 0) {
             var mod_names = [];
             for (const Module of g_pog_json[g_pog_index].ModuleInfo) {
-                mod_names.push(Module.Module.toUpperCase());
+                if ($v("P25_POG_MODULE_NAME_TYPE") == "A") { //ASA-2071
+                    mod_names.push(Module.Module.toUpperCase());
+                }
+                else {
+                    mod_names.push(Module.Module);
+                }
             }
             var module_list = [];
             var module_detail = {};
@@ -8673,16 +8741,42 @@ async function create_pog_module(p_camera, p_pog_index) {
         if (typeof g_pog_json !== "undefined" && g_pog_json[p_pog_index].ModuleInfo.length > 0) {
             var i = 0;
             for (const Module of g_pog_json[p_pog_index].ModuleInfo) {
-                if (Module.Module.toUpperCase() == POGModule.toUpperCase()) {
-                    ModuleInfo = Module;
-                    if (edited_ind == "Y" && g_module_index !== i) {
-                        duplicate_ind = "Y";
-                        break; //return false; // Loop will stop running after this
-                    } else if (edited_ind == "N") {
-                        duplicate_ind = "Y";
-                        break; //return false; // Loop will stop running after this
+                //ASA-2071  Start    
+                // if (Module.Module.toUpperCase() == POGModule.toUpperCase()) {
+                //     ModuleInfo = Module;
+                //     if (edited_ind == "Y" && g_module_index !== i) {
+                //         duplicate_ind = "Y";
+                //         break; //return false; // Loop will stop running after this
+                //     } else if (edited_ind == "N") {
+                //         duplicate_ind = "Y";
+                //         break; //return false; // Loop will stop running after this
+                //     }
+                // }      
+                if ($v("P25_POG_MODULE_NAME_TYPE") == "A") {
+                    if (Module.Module.toUpperCase() == POGModule.toUpperCase()) {
+                        ModuleInfo = Module;
+                        if (edited_ind == "Y" && g_module_index !== i) {
+                            duplicate_ind = "Y";
+                            break; //return false; // Loop will stop running after this
+                        } else if (edited_ind == "N") {
+                            duplicate_ind = "Y";
+                            break; //return false; // Loop will stop running after this
+                        }
                     }
                 }
+                else {
+                    if (Module.Module == POGModule) {
+                        ModuleInfo = Module;
+                        if (edited_ind == "Y" && g_module_index !== i) {
+                            duplicate_ind = "Y";
+                            break; //return false; // Loop will stop running after this
+                        } else if (edited_ind == "N") {
+                            duplicate_ind = "Y";
+                            break; //return false; // Loop will stop running after this
+                        }
+                    }
+                }
+                //ASA-2071 End          
                 i++;
             }
         }
@@ -10061,10 +10155,10 @@ function create_divider(p_pog_index) {
             //as divider is a fixel but it is consider as a item inside the shelf, which is dragged and placed according to shelf spread setting.
             //so we keep one shelfinfo for data to be saved in sm_pog_fixel and a iteminfo for use to use it for all actions on screen. both data
             //should be in sync always.
-             //ASA-2049 Issue 4
+            //ASA-2049 Issue 4
             if (edited == "Y") {
                 var currShelf = g_pog_json[p_pog_index].ModuleInfo[g_module_index].ShelfInfo[g_shelf_index];
-                var oldWidth = currShelf.ItemInfo[g_item_index].W; 
+                var oldWidth = currShelf.ItemInfo[g_item_index].W;
             }
             //ASA-2049 Issue 4
 
@@ -10326,10 +10420,10 @@ function create_divider(p_pog_index) {
                     g_pog_json[p_pog_index].ModuleInfo[g_module_index].ItemInfo.push(ItemInfo);
                 }
                 item_cnt = g_pog_json[p_pog_index].ModuleInfo[g_module_index].ShelfInfo[g_shelf_index].ItemInfo.length - 1;
-            } 
+            }
             else {
                 //ASA-2049 Issue 4
-                var l_newWidth = parseFloat($v("P25_DIV_WIDTH")) / 100; 
+                var l_newWidth = parseFloat($v("P25_DIV_WIDTH")) / 100;
                 var l_widthDiff = (l_newWidth - oldWidth) * 100;
                 if (l_widthDiff > 0 && l_widthDiff > currShelf.AvlSpace) {
                     alert(get_message("LOST_FROM_SHELF_ERR_HORIZ", currShelf.Shelf));
@@ -10342,7 +10436,7 @@ function create_divider(p_pog_index) {
                 }
                 showFixelAvailableSpace("N", "N", p_pog_index);
                 //ASA-2049 Issue 4
-                
+
                 ShelfInfo["Z"] = g_pog_json[p_pog_index].ModuleInfo[g_module_index].ShelfInfo[g_shelf_index].ItemInfo[g_item_index].Z;
                 g_pog_json[p_pog_index].ModuleInfo[g_module_index].ShelfInfo[upd_shelf_index] = ShelfInfo;
                 ItemInfo["OW"] = g_pog_json[p_pog_index].ModuleInfo[g_module_index].ShelfInfo[g_shelf_index].ItemInfo[g_item_index].OW;
@@ -10352,7 +10446,7 @@ function create_divider(p_pog_index) {
                 item_cnt = g_item_index;
             }
 
-            if (edited == "Y") {            
+            if (edited == "Y") {
                 var selectedObject = g_scene_objects[p_pog_index].scene.children[2].getObjectById(g_dblclick_objid);
                 g_scene_objects[p_pog_index].scene.children[2].remove(selectedObject);
                 render(p_pog_index);
@@ -10365,7 +10459,7 @@ function create_divider(p_pog_index) {
             if (edited == "N") {
                 g_pog_json[p_pog_index].ModuleInfo[g_module_index].ShelfInfo[g_shelf_index].ItemInfo[g_pog_json[p_pog_index].ModuleInfo[g_module_index].ShelfInfo[g_shelf_index].ItemInfo.length - 1].ObjID = oBjID;
             } else {
-                g_pog_json[p_pog_index].ModuleInfo[g_module_index].ShelfInfo[g_shelf_index].ItemInfo[g_item_index].ObjID = oBjID;               
+                g_pog_json[p_pog_index].ModuleInfo[g_module_index].ShelfInfo[g_shelf_index].ItemInfo[g_item_index].ObjID = oBjID;
             }
             g_pog_json[p_pog_index].ModuleInfo[g_module_index].ShelfInfo[upd_shelf_index].ShelfDivObjID = oBjID;
 

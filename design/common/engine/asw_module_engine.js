@@ -376,7 +376,7 @@ async function create_module_from_json_lib(p_pog_json_arr, p_new_pog_ind, p_pog_
 
                     var i = 0;
                     for (const modules of g_json_mod_dtl) {
-                        if (modules.ShelfInfo.length > 0) {
+                        if (modules.ShelfInfo && modules.ShelfInfo.length > 0) {
                             $.each(modules.ShelfInfo, function (k, shelfs) {
                                 if (typeof shelfs !== "undefined") {
                                     if (shelfs.ObjType == "BASE") {
@@ -391,7 +391,7 @@ async function create_module_from_json_lib(p_pog_json_arr, p_new_pog_ind, p_pog_
                 var i = 0;
                 var module_ind = -1;
                 for (const modules of module_details) {
-                    if (modules.ShelfInfo.length > 0) {
+                    if (modules.ShelfInfo && modules.ShelfInfo.length > 0) {
                         $.each(modules.ShelfInfo, function (k, shelfs) {
                             if (typeof shelfs !== "undefined") {
                                 if (shelfs.ObjType == "BASE") {

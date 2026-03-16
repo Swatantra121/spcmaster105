@@ -608,12 +608,13 @@ async function set_scene(p_pog_details, p_save_pdf, p_notch_label, p_fixel_label
                 var k = 0;
                 noDataModuleWIdth = 0;
                 var prevModule = "-1";
-                if (!modules.Module.includes(g_nodataModuleName)) {
+                var moduleName = String(modules.Module); //ASA-2071.1
+                if (!moduleName.includes(g_nodataModuleName)) {
                     var moduleX = new_pogjson[p_pog_index].ModuleInfo[i].W;
                     for (var mod of new_pogjson[p_pog_index].ModuleInfo) {
                         prevModule = modules.Module;
                         if (k > i) {
-                            if (nvl(mod.ParentModule) == 0 && mod.Module.includes(g_nodataModuleName)) {
+                            if (nvl(mod.ParentModule) == 0 && mod.Module.toString().includes(g_nodataModuleName)) { //ASA-2071.1
                                 var module = g_world.getObjectById(mod.MObjID);
                                 var moduleY = mod.H / 2 + g_pog_json[p_pog_index].BaseH;
                                 noDataModuleWIdth = noDataModuleWIdth + mod.W + 0.01;
@@ -648,7 +649,8 @@ async function set_scene(p_pog_details, p_save_pdf, p_notch_label, p_fixel_label
 
             base64 = "";
             //g_nodataModuleName will have few module names. that do not be printed in PDF. so we avoid that.
-            if (!modules.Module.includes(g_nodataModuleName)) {
+            var mdlName = String(modules.Module); //ASA-2071.1
+            if (!mdlName.includes(g_nodataModuleName)) {
                 var dataURL = await g_new_canvas.toDataURL("image/jpeg", enhance);
                 var img_details = {};
                 img_details["Module"] = modules.Module;
@@ -715,7 +717,7 @@ async function set_scene(p_pog_details, p_save_pdf, p_notch_label, p_fixel_label
                                 if (shelfs.ObjType == "TEXTBOX") {
                                     var shelf = g_scene_objects[p_pog_index].scene.children[2].getObjectById(shelfs.SObjID);
                                     if (typeof shelf !== "undefined") {
-                                        shelf.material.transparent = true;
+                                       shelf.material.transparent = true;
                                     }
                                 }
                             }

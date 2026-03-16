@@ -412,7 +412,7 @@ function set_camera_z(p_camera, p_x, p_y, p_width, p_height, p_offset, p_min_x, 
             }
         }
         //p_offset is the standard value to give a little extra space on all sides.
-        p_camera.position.z = p_offset + camera_z;
+        p_camera.position.z = p_offset + camera_z + 0.6;
         if (p_updateJSON) {
             g_pog_json[p_pog_index].CameraX = p_x;
             g_pog_json[p_pog_index].CameraY = p_y;
@@ -545,7 +545,7 @@ function wrapText(p_context, p_text, p_x, p_y, p_maxWidth, p_lineHeight) {
     }
 }
 
-function dcText(p_txt, p_font_size, p_fgcolor, p_bgcolor, p_width, p_height, p_wrap_text, p_reducetofit, p_fontstyle, p_fontbold, p_fontsize, p_mod_index, p_shelf_cnt, p_enlarge_no, p_pog_index, p_pogcr_enhance_textbox_fontsize, p_text_direction) {
+function dcText(p_txt, p_font_size, p_fgcolor, p_bgcolor, p_width, p_height, p_wrap_text, p_reducetofit, p_fontstyle, p_fontbold, p_fontsize, p_mod_index, p_shelf_cnt, p_enlarge_no, p_pog_index, p_pogcr_enhance_textbox_fontsize, p_text_direction, p_center_wrap) {
     try {
         logDebug("function : dcText; txt : " + p_txt, "S");
         if (p_shelf_cnt !== -1) {
@@ -712,8 +712,46 @@ function dcText(p_txt, p_font_size, p_fgcolor, p_bgcolor, p_width, p_height, p_w
             ctx.font = (p_fontbold ? p_fontbold + " " : "") + " " + text_height + "px " + p_fontstyle; // ASA 2030 ISSUE 1 FIX
 
             var lineHeight = advMetrics.lineHeight - advMetrics.lineGap;
-            if (p_wrap_text == "Y" && metrics > canvasWidth) {
-                wrapText(ctx, p_txt, canvasWidth / 2, text_height, canvasWidth, lineHeight);
+            if (p_wrap_text == "Y" && (metrics > canvasWidth || p_center_wrap == "Y")) {
+                if (p_center_wrap == "Y") {
+                    // Centered wrap with padding: compute all lines first, then draw vertically centered
+                    var cw_pad = Math.round(Math.min(canvasWidth, canvasHeight) * 0.08);
+                    var cw_aw = canvasWidth - cw_pad * 2;
+                    var cw_ah = canvasHeight - cw_pad * 2;
+                    var cw_min_th = 6 * p_enlarge_no; // minimum: 6pt equivalent
+                    var cw_th = text_height, cw_lines = [];
+                    // Auto-shrink: reduce font until wrapped lines actually fit in padded height
+                    while (cw_th >= cw_min_th) {
+                        ctx.font = (p_fontbold ? p_fontbold + " " : "") + cw_th + "px " + p_fontstyle;
+                        // Treat underscores as soft break points
+                        var cw_words = p_txt.replace(/_(?=[^\s])/g, "_ ").split(" ").filter(Boolean);
+                        cw_lines = []; var cw_cur = "";
+                        for (var cwi = 0; cwi < cw_words.length; cwi++) {
+                            var cw_word = cw_words[cwi];
+                            while (ctx.measureText(cw_word).width > cw_aw && cw_word.length > 1) {
+                                var cwcut = 1;
+                                while (cwcut < cw_word.length - 1 && ctx.measureText(cw_word.substring(0, cwcut + 1)).width <= cw_aw) cwcut++;
+                                if (cw_cur) { cw_lines.push(cw_cur); cw_cur = ""; }
+                                cw_lines.push(cw_word.substring(0, cwcut));
+                                cw_word = cw_word.substring(cwcut);
+                            }
+                            var cw_test = cw_cur ? cw_cur + " " + cw_word : cw_word;
+                            if (ctx.measureText(cw_test).width > cw_aw && cw_cur) { cw_lines.push(cw_cur); cw_cur = cw_word; }
+                            else { cw_cur = cw_test; }
+                        }
+                        if (cw_cur) cw_lines.push(cw_cur);
+                        if (cw_lines.length * cw_th * 1.3 <= cw_ah) break; // fits — use this size
+                        cw_th -= p_enlarge_no; // reduce by 1pt and retry
+                    }
+                    var cw_line_h = cw_th * 1.3;
+                    var cw_total_h = cw_lines.length * cw_line_h;
+                    var cw_start_y = cw_pad + Math.max(0, (cw_ah - cw_total_h) / 2) + cw_line_h / 2;
+                    for (var cwli = 0; cwli < cw_lines.length; cwli++) {
+                        ctx.fillText(cw_lines[cwli], canvasWidth / 2, cw_start_y + cwli * cw_line_h);
+                    }
+                } else {
+                    wrapText(ctx, p_txt, canvasWidth / 2, text_height, canvasWidth, lineHeight);
+                }
             } else {
                 ctx.fillText(p_txt, canvasWidth / 2, canvasHeight / 2);
             }
@@ -3806,6 +3844,20 @@ function set_multi_blink(p_pog_json, p_pog_index) {
         g_intersected = [];
         if (typeof g_delete_details !== "undefined") {
             $.each(g_delete_details, function (j, details) {
+                if (details.Object === "BLOCK") {
+                    // Must re-find the decorated mesh (has WireframeObj)
+                    // NOT via getObjectById (returns undecorated raw mesh)
+                    var blkMesh = null;
+                    if (details._blkRef && details._blkRef.BlockDim && details._blkRef.BlockDim.ColorObj) {
+                        details._blkRef.BlockDim.ColorObj.traverse(function(child) {
+                            if (!blkMesh && child.uuid === details.BlkName) blkMesh = child;
+                        });
+                        if (!blkMesh) blkMesh = details._blkRef.BlockDim.ColorObj;
+                    }
+                    if (blkMesh) g_intersected.push(blkMesh);
+                    return; // $.each continue
+                }
+                // Original unchanged path
                 var selectedObject = g_scene_objects[p_pog_index].scene.children[2].getObjectById(details.ObjID);
                 g_intersected.push(selectedObject);
             });

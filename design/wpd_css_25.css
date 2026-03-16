@@ -630,3 +630,15 @@ input[type="number"] {
      position: fixed;
 }
 */
+
+
+/* .h-view .row .canvas-content:not(:first-child)::after {
+    content: '';
+    position: absolute;
+    background-color: #000;
+    width: 1px;
+    height: 100%;
+    top: 0;
+    left: 0;
+    cursor: row-resize;
+} */

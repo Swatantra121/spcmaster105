@@ -1,4 +1,3 @@
-
 function get_new_orientation_dim(p_orientation, p_item_width, p_item_height, p_item_depth) {
     try {
         logDebug("function : get_new_orientation_dim; orientation : " + p_orientation + "; item_width : " + p_item_width + "; item_height : " + p_item_height + "; item_depth : " + p_item_depth, "S");
@@ -64,7 +63,6 @@ function get_new_orientation_dim(p_orientation, p_item_width, p_item_height, p_i
         error_handling(err);
     }
 }
-
 
 //This function is used when on off show live image or create PDF with item image.
 async function recreate_image_items(p_show_live_ind, p_merchStyle, p_load_img_from, p_bu_id, p_item_num_lbl_color, p_item_num_lbl_pos, p_display_item_info, p_delist_item_dft_color, p_notch_head, p_pog_index, p_days_of_supply_show = "Y", p_daysofsuppFontSize = "N,0.018", p_itemDtlList) {
@@ -1080,6 +1078,17 @@ async function add_items_prom(p_uuid, p_width, p_height, p_depth, p_color, p_x, 
         }
         p_color = typeof p_color == "undefined" ? "#FFFFFF" : p_color; //ASA-1450
         objType = shelfdtl.ObjType;
+        
+        //ASA-2076
+        if (objType == "PEGBOARD") {
+            var prevItem = shelfdtl.ItemInfo[p_item_index];
+            if (prevItem && prevItem.ObjID) {
+                var existing = g_world.getObjectById(prevItem.ObjID);
+                if (existing) {
+                    g_world.remove(existing);
+                }
+            }
+        }
 
         var items = shelfdtl.ItemInfo[p_item_index];
         var pegID = items.PegID;
@@ -2673,7 +2682,7 @@ function get_item_xaxis(p_width, p_height, p_depth, p_shelf_obj_type, p_location
                                             var shelf_end = shelfdtl.X + shelfdtl.W / 2;
                                         }
                                         finalX = shelf_end - p_width / 2 + shelfdtl.ROverhang;
-                                    } else {
+                                    }  else {
                                         finalX = shelfdtl.ItemInfo[max_index].X - shelfdtl.ItemInfo[max_index].W / 2 - parseFloat(p_width) / 2 - p_spread_gap;
                                     }
                                 }

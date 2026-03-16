@@ -1,6 +1,7 @@
 g_show_error = true;
 g_pog_json = [];
 g_mod_block_list = [];
+g_reset_block_snapshot = [];
 g_pog_edited_ind = 'Y';
 g_auto_fill_active = 'N';
 g_autofillModInfo = [];
@@ -10,47 +11,41 @@ g_allUndoObjectsInfo = [];
 g_deletedItems = [];
 g_delete_details = [];
 g_ComViewIndex = -1;
-g_show_changes_block_snapshot = [];  //ASA-1986 
+g_show_changes_block_snapshot = [];  //ASA-1986  
 g_show_live_image = "N";
-g_selected_block  = [];
-//ASA-1986 start
-function wpdBuildShowChangesBlockSnapshot(p_block_list) {
-    var snapshot = [];
-    if (!Array.isArray(p_block_list)) {
-        return snapshot;
-    }
-    for (const blk of p_block_list) {
-        if (typeof blk === "undefined" || blk == null) {
-            continue;
-        }
-        var dragStartX = blk.DragMouseStart && typeof blk.DragMouseStart.x !== "undefined" ? Number(blk.DragMouseStart.x) : 0;
-        var dragStartY = blk.DragMouseStart && typeof blk.DragMouseStart.y !== "undefined" ? Number(blk.DragMouseStart.y) : 0;
-        var dragEndX = blk.DragMouseEnd && typeof blk.DragMouseEnd.x !== "undefined" ? Number(blk.DragMouseEnd.x) : 0;
-        var dragEndY = blk.DragMouseEnd && typeof blk.DragMouseEnd.y !== "undefined" ? Number(blk.DragMouseEnd.y) : 0;
-        var blkSnapshot = {};
-        blkSnapshot["BlkName"] = blk.BlkName;
-        blkSnapshot["BlkColor"] = blk.BlkColor;
-        blkSnapshot["BlkRule"] = blk.BlkRule;
-        blkSnapshot["DragMouseStart"] = { x: dragStartX, y: dragStartY };
-        blkSnapshot["DragMouseEnd"] = { x: dragEndX, y: dragEndY };
-        blkSnapshot["BlkModInfo"] = Array.isArray(blk.BlkModInfo) ? JSON.parse(JSON.stringify(blk.BlkModInfo)) : [];
-        blkSnapshot["BlkShelfInfo"] = Array.isArray(blk.BlkShelfInfo) ? JSON.parse(JSON.stringify(blk.BlkShelfInfo)) : [];
-        blkSnapshot["mod_index"] = Array.isArray(blk.mod_index) ? JSON.parse(JSON.stringify(blk.mod_index)) : [];
-        snapshot.push(blkSnapshot);
-    }
-    return snapshot;
+g_selected_block = [];
+var g_block_resize_state = {
+    armed: false,
+    active: false,
+    blkName: null,
+    startX: 0,
+    startWidth: 0,
+    blkRef: null,
+    edge: null,
+    hoverEdge: null,
+    startPointerLocalX: 0,
+    startCalcX: 0,
+    startLeft: 0,
+    startRight: 0
 }
-//ASA-1986  end
-function wpdCaptureShowChangesBlockSnapshot(p_block_list, p_force = "N") {
-    if (p_force == "Y" || !Array.isArray(g_show_changes_block_snapshot) || g_show_changes_block_snapshot.length === 0) {
-        g_show_changes_block_snapshot = wpdBuildShowChangesBlockSnapshot(p_block_list);
+//ASA 1986  compare
+var g_show_changes_block_diff_state = {
+    active: "N",
+    baseIndex: -1,
+    compareIndex: -1,
+    diffSummary: {
+        Added: [],
+        Deleted: [],
+        Edited: []
     }
-}
+};
+
+
 //This function is called from page 25 execute on page load.
 function initiate_values_onload() {
+    logDebug("function : initiate_values_onload", "S");
     sessionStorage.setItem("g_dbuDebugEnabled", $v("P193_POGC_JS_DEBUG_ENABLE"));
-    logDebug("onload code ; ", "S");
-
+    show_blk_changes_close_hook(); //ASA 1986  compare
     if (!document.getElementById("ig_mod_details")) {
         var igDiv = document.createElement("div");
         igDiv.id = "ig_mod_details";
@@ -73,29 +68,17 @@ function initiate_values_onload() {
         }
     } catch (err) {
         console.log("Error while loading POGJSON from sessionStorage:", err);
-    }
-    //g_trs is a global variable which will hold all the row element of product list. this is used to do multi select using shift key when select item to drag into POG.
-    if (document.getElementById("draggable_table") !== null) {
-        g_trs = document.getElementById("draggable_table").getElementsByTagName("tr");
-    }
-    //this is binding the drag events which will link with product list to canvas. this will allow track items dragging from product list to any canvas.
-    $("#canvas-holder")
-        .bind("dragenter dragover", false)
-        .bind("drop", function (event) {
-            console.log("drop bind");
-        });
+    }   
     var l_delete_ind = $v("P193_DELETE_IND");//pushed this variable inside as its used only in this function.
     back_clicked = "N";
     const input = document.getElementById("P193_UPLOAD_HIDDEN");
-
-
-
     var facingskey = null;
     var noOfFacings = 0;
     var num_key_no = 0;
     var numpad_key = false;
     //below events keydown and keyup are using to identify any keyboard events and no of short cut keys logic handling.
     $(document).keydown(function (e) {
+
         if (g_delete_details.length > 0) {
             new_details = JSON.parse(JSON.stringify(g_delete_details));
 
@@ -105,16 +88,6 @@ function initiate_values_onload() {
         } else {
             new_details = [];
         }
-        //Alt + F = open find popup which will search any item or fixel and add blink to that particular object.
-        if (e.altKey && e.keyCode == 70) {
-            e.preventDefault();
-            openInlineDialog("find", 35, 45);
-        }
-        //Ctrl + i - open update item info popup
-        if (e.keyCode == 73 && e.ctrlKey == true && typeof g_pog_json !== "undefined" && g_pog_json.length > 0) {
-            open_update_item_info();
-        }
-
         var map = {};
         var down_map = {};
         var lastKeyPress = e.keyCode;
@@ -126,12 +99,7 @@ function initiate_values_onload() {
             if (e.type == "keyup" && e.keyCode == 67) {
                 console.log('key up 67 up');
             }
-            //holding Key C and then try to move the chest. then only the chest should move. else we should create a multi select area.
-            if (e.type == "keydown" && e.keyCode == 67) { //ASA-1300
-                g_chest_move = "Y";
-            } else {
-                g_chest_move = "N";
-            }
+           
             //ASA-1422
             //if shift is pressed and click on any item. we consider it as multi select of items. else old selection will be removed and new selection will be added.
             if (e.type == "keydown" && e.shiftKey) {
@@ -140,91 +108,7 @@ function initiate_values_onload() {
                 g_shift_mutli_item_select = 'N';
                 g_shift_multi_item_first = {};
                 g_shift_multi_item_last = {};
-            }
-            //below logic is used to identify which no user has clicked. this includes both numbers on top of characters in keyboard or number pad in the keyboard.
-            //we use this in Shift + V,H + 1-9 -- Which will increase or decrease facings using key board.
-            if (e.type == "keydown" && e.code !== "ShiftLeft" && (e.code == "Numpad1" || e.code == "Numpad2" || e.code == "Numpad3" || e.code == "Numpad4" || e.code == "Numpad5" || e.code == "Numpad6" || e.code == "Numpad7" || e.code == "Numpad8" || e.code == "Numpad9")) {
-                console.log("e.code", e.code);
-                numpad_key = true;
-                switch (e.code) {
-                    case "Numpad1":
-                        num_key_no = 1;
-                        break;
-                    case "Numpad2":
-                        num_key_no = 2;
-                        break;
-                    case "Numpad3":
-                        num_key_no = 3;
-                        break;
-                    case "Numpad4":
-                        num_key_no = 4;
-                        break;
-                    case "Numpad5":
-                        num_key_no = 5;
-                        break;
-                    case "Numpad6":
-                        num_key_no = 6;
-                        break;
-                    case "Numpad7":
-                        num_key_no = 7;
-                        break;
-                    case "Numpad8":
-                        num_key_no = 8;
-                        break;
-                    case "Numpad9":
-                        num_key_no = 9;
-                        break;
-                }
-            }
-
-            if (e.type == "keyup" && g_pog_index !== g_ComViewIndex) {
-                //if user is clicking numbers on top of characters or from number pad. we call facings change function.
-                //Shift + H - facingskey = "horizfacing"
-                //Shift + V - facingskey = "vertfacing"
-                //Shift + D - facingskey = "depthfacing";
-                if (map[16] == true && map[72] == true && (map[49] == true || map[50] == true || map[51] == true || map[52] == true || map[53] == true || map[54] == true || map[55] == true || map[56] == true || map[57] == true || numpad_key)) {
-                    //ASA -1105
-                    facingskey = "horizfacing";
-                    console.log("map", map, e.type, e.keyCode, lastKeyPress, String.fromCharCode(lastKeyPress));
-                    if (lastKeyPress >= 49 && lastKeyPress <= 57) {
-                        incrementFacingsFromKey(facingskey, String.fromCharCode(lastKeyPress));
-                    } else {
-                        incrementFacingsFromKey(facingskey, num_key_no); //ASA -1105
-                    }
-                    map = {};
-                    facingskey = null;
-                    lastKeyPress = null;
-                    num_key_no = 0;
-                    numpad_key = false;
-                } else if (map[16] == true && map[86] == true && (map[49] == true || map[50] == true || map[51] == true || map[52] == true || map[53] == true || map[54] == true || map[55] == true || map[56] == true || map[57] == true || numpad_key)) {
-                    //ASA -1105
-                    facingskey = "vertfacing";
-                    console.log("map", map, e.type, e.keyCode, lastKeyPress, String.fromCharCode(lastKeyPress));
-                    if (lastKeyPress >= 49 && lastKeyPress <= 57) {
-                        incrementFacingsFromKey(facingskey, String.fromCharCode(lastKeyPress));
-                    } else {
-                        incrementFacingsFromKey(facingskey, num_key_no); //ASA -1105
-                    }
-                    map = {};
-                    facingskey = null;
-                    num_key_no = 0;
-                    numpad_key = false;
-                } else if (map[16] == true && map[68] == true && (map[49] == true || map[50] == true || map[51] == true || map[52] == true || map[53] == true || map[54] == true || map[55] == true || map[56] == true || map[57] == true || numpad_key)) {
-                    //ASA -1105
-                    facingskey = "depthfacing";
-                    if (lastKeyPress >= 49 && lastKeyPress <= 57) {
-                        incrementFacingsFromKey(facingskey, String.fromCharCode(lastKeyPress));
-                    } else {
-                        incrementFacingsFromKey(facingskey, num_key_no); //ASA -1105
-                    }
-                    map = {};
-                    facingskey = null;
-                    num_key_no = 0;
-                    numpad_key = false;
-                } else {
-                    facingskey = null;
-                }
-            }
+            } 
         };
         //Ctrl + Arrow up / down / left / right considered as moving shelf using keyboard. 
         if (e.shiftKey && (e.keyCode == 38 || e.keyCode == 40 || e.keyCode == 37 || e.keyCode == 39) && g_pog_index !== g_ComViewIndex) {
@@ -238,10 +122,12 @@ function initiate_values_onload() {
                 drag_fixel(g_module_index, g_shelf_index, g_item_index, "R", g_pog_index);
             }
             //to stop going into other if clause when facings function is called.
-        } else if (facingskey !== null && (facingskey == "horizfacing" || facingskey == "vertfacing")) {
+        } 
+        else if (facingskey !== null && (facingskey == "horizfacing" || facingskey == "vertfacing")) {
             console.log("incrment facings ", facingskey, noOfFacings);
             //if facings is not updated then check other short cuts.
-        } else if (facingskey == null) {
+        } 
+        else if (facingskey == null) {
             if ((g_pog_index == g_ComViewIndex && ((g_compare_view == "EDIT_PALLET" && e.keyCode !== 46) || (g_compare_view == "PREV_VERSION" && e.keyCode == 67 && e.ctrlKey == true && g_edit_ind == "Y"))) || g_pog_index !== g_ComViewIndex) {
                 if ((g_multiselect == "N" || (e.keyCode == 38 && e.ctrlKey == true) || (e.keyCode == 40 && e.ctrlKey == true)) && (g_taskItemInContext1 || g_taskItemInContext || (e.keyCode == 38 && e.ctrlKey == true) || (e.keyCode == 40 && e.ctrlKey == true)) && g_dblclick_opened == "N" && ((e.keyCode == 67 && e.ctrlKey == true) || e.keyCode == 46 || (e.keyCode == 86 && e.ctrlKey == true) || (e.keyCode == 88 && e.ctrlKey == true) || (e.keyCode == 69 && e.ctrlKey == true) || (e.keyCode == 81 && e.ctrlKey == true) || (e.keyCode == 76 && e.ctrlKey == true) || (e.keyCode == 90 && e.ctrlKey == true) || (e.keyCode == 38 && e.ctrlKey == true) || (e.keyCode == 40 && e.ctrlKey == true))) {
                     if ((e.keyCode == 69 && e.ctrlKey == true) /*ctrl + E*/ || (e.keyCode == 76 && e.ctrlKey == true) /*ctrl + L*/) {
@@ -377,6 +263,7 @@ function initiate_values_onload() {
     window.onbeforeunload = function (event) {
         if (g_pog_json.length > 0 && typeof g_pog_json !== "undefined" && back_clicked == "N") {
             sessionStorage.setItem("POGJSON", LZString.compress(JSON.stringify(g_pog_json)));
+            sessionStorage.setItem("POGExists", "Y");
             sessionStorage.setItem("g_color_arr", LZString.compress(JSON.stringify(g_color_arr)));
             sessionStorage.setItem("g_highlightArr", LZString.compress(JSON.stringify(g_highlightArr)));
             try {
@@ -551,43 +438,7 @@ function initiate_values_onload() {
     g_color_arr = sessionStorage.getItem("g_color_arr") !== null ? JSON.parse(LZString.decompress(sessionStorage.getItem("g_color_arr"))) : [];
     g_highlightArr = sessionStorage.getItem("g_highlightArr") !== null ? JSON.parse(LZString.decompress(sessionStorage.getItem("g_highlightArr"))) : [];
     $s("P193_POG_DESCRIPTION", sessionStorage.getItem("P193_POG_DESCRIPTION"));
-    $s("P193_EXISTING_DRAFT_VER", sessionStorage.getItem("P193_EXISTING_DRAFT_VER"));
-    $(".input-group").on("click", ".button-plus", function (e) {
-        incrementValue(e);
-    });
-    $(".input-group").on("click", ".button-minus", function (e) {
-        decrementValue(e);
-    });
-    $(".input-group1").on("click", ".button-plus", function (e) {
-        incrementValue(e);
-    });
-    $(".input-group1").on("click", ".button-minus", function (e) {
-        decrementValue(e);
-    });
-    $(".input-group2").on("click", ".button-plus", function (e) {
-        incrementValue(e);
-    });
-    $(".input-group2").on("click", ".button-minus", function (e) {
-        decrementValue(e);
-    });
-
-    //ASA-1640 Start
-    // $(".input-group").on("keydown", ".quantity-field", function (e) {
-    //     if (e.keyCode == 9) {
-    //         incrementValue(e);
-    //     }
-    // });
-
-    $("#item_facings div").on("keydown", ".quantity-field", function (e) {
-        if (e.keyCode == 9) {
-            var fieldName = $(e.target).attr('name');
-            var currentVal = $(e.target).val();
-            if (currentVal > 0) {
-                incrementValue(e, fieldName, currentVal);
-            }
-        }
-    });
-    //ASA-1640 End
+    $s("P193_EXISTING_DRAFT_VER", sessionStorage.getItem("P193_EXISTING_DRAFT_VER")); 
 
     //setting few global variables from page items.
     g_chest_as_pegboard = $v("P193_POGCR_CHEST_AS_PEGBOARD");
@@ -617,44 +468,6 @@ function initiate_values_onload() {
     g_open_from = "";
     g_sublabel_type = $v("P193_POGCR_ITEM_ADDITIONAL_INFO");
 
-
-    // if (sessionStorage.getItem("POGJSON") !== null) {
-    //     (async function () {
-    //         try {
-    //             var TEMP_POG = JSON.parse(LZString.decompress(sessionStorage.getItem("POGJSON")));
-    //             g_pog_json = TEMP_POG;
-    //             if (TEMP_POG && TEMP_POG.length > 0) {
-    //                 addLoadingIndicator();
-    //                 appendMultiCanvasRowCol(TEMP_POG.length, $v("P193_POGCR_TILE_VIEW"));
-    //                 g_pog_index = 0;
-    //                 g_multi_pog_json = [];
-    //                 g_scene_objects = [];
-    //                 g_canvas_objects = [];
-    //                 for (var p = 0; p < TEMP_POG.length; p++) {
-    //                     g_pog_index = p;
-    //                     init(p);
-    //                     objects = {};
-    //                     objects["scene"] = g_scene;
-    //                     objects["renderer"] = g_renderer;
-    //                     g_scene_objects.push(objects);
-    //                     await create_module_from_json(TEMP_POG, sessionStorage.getItem("new_pog_ind"), "F", $v("P193_PRODUCT_BTN_CLICK"), sessionStorage.getItem("pog_opened"), "N", "N", "Y", "Y", "", "N", g_scene_objects[p].scene.children[0], g_scene_objects[p].scene, g_pog_index, p);
-    //                     g_pog_index = p;
-    //                     render(p);
-    //                     animate_pog(p);
-    //                 }
-    //                 removeLoadingIndicator(regionloadWait);
-    //                 g_pog_json = g_multi_pog_json;
-    //                 if (sessionStorage.getItem("gPogIndex") !== null) {
-    //                     var savedIndex = parseInt(sessionStorage.getItem("gPogIndex"));
-    //                     g_pog_index = savedIndex;
-    //                     set_select_canvas(savedIndex);
-    //                 }
-    //             }
-    //         } catch (err) {
-    //             error_handling(err);
-    //         }
-    //     })();
-    // }
 
     if (sessionStorage.getItem("POGJSON") !== null) {
         if (window._pog_restore_in_progress) {
@@ -790,7 +603,8 @@ function initiate_values_onload() {
         label: "Show Changes",
         action: function (event, focusElement, data) {
             if (g_compare_pog_flag == "Y" && g_compare_view == "POG" && g_ComViewIndex > -1) {
-                raise_error("POG already open.");
+                //raise_error("POG already open.");
+                raise_error(POG_ALREADY_OPEN);
                 return;
             }
             // g_open_from = 'O';
@@ -809,16 +623,17 @@ function initiate_values_onload() {
                 l_compareInd = 2;
                 l_draftId = $v("P193_EXISTING_DRAFT_VER");
             }
-            if ((l_pogCode === "" || l_pogVersion === "" ) && l_draftId ==="") {
-                raise_error("Please open a POG before Show Changes.");
-                
+            if ((l_pogCode === "" || l_pogVersion === "") && l_draftId === "") {
+                //raise_error("Please open a POG before Show Changes.");
+                raise_error(SHOW_POG_CHANGES);
                 return;
             }
-            else{
+            else {
+                $(".wt-analysis").addClass('disable');
                 comparePOG(l_compareInd, l_pogCode, l_pogVersion, l_draftId, "N", "Y", g_show_changes_block_snapshot); //ASA-1986 END
             }
             // comparePOG(l_compareInd, l_pogCode, l_pogVersion, l_draftId, "N", "Y", g_show_changes_block_snapshot); //ASA-1986 END
-            
+
         },
         // shortcut: "Alt+O,E",
     });
@@ -826,8 +641,8 @@ function initiate_values_onload() {
     apex.actions.add({
         name: "view-analysis",
         label: "View Analysis",
-        action: function () {
-            open_view_analysis();
+        action: async function () {
+            await open_view_analysis();
         },
     });
 
@@ -837,6 +652,14 @@ function initiate_values_onload() {
         action: function (event, focusElement, data) {
             g_open_from = 'O';
             save_af_version();
+        },
+    });
+
+    apex.actions.add({
+        name: "pog-reset",
+        label: "Reset",
+        action: function (event, focusElement, data) {
+            reset_af_version();
         },
     });
 
@@ -852,282 +675,7 @@ function initiate_values_onload() {
     var devicePixelRatio = window.devicePixelRatio;
     g_start_pixel_ratio = devicePixelRatio;
 
-    //logDebug("onload code ; ", "E");
-}
-
-// Moved to asw_common_functions.js
-//this function is used under setUpMouseHander in asw_common_main.js. as this function is used only in page 25.
-//this function will be called on mouse down. it will find out on which canvas user clicked and assing g_pog_index and all other indicators for the clicked POG canvas.
-// function set_curr_canvas(p_event) {
-//     var new_camera = {};
-//     var new_world;
-//     if (p_event.target.nodeName == "CANVAS") {
-//         if (p_event.type !== "mousemove") {
-//             g_canvas = p_event.target;
-//             if (p_event.type == "mousedown") {
-//                 g_all_pog_flag = "N";
-//             }
-//             g_pog_index = parseInt(g_canvas.getAttribute("data-indx"));
-//             if (g_pog_index == null) {
-//                 g_pog_index = 0;
-//             }
-//         } else {
-//             var canvas_drag = p_event.target;
-//         }
-
-//         if (g_scene_objects.length > 0) {
-//             if (typeof g_scene_objects[g_pog_index] !== "undefined") {
-//                 g_scene = g_scene_objects[g_pog_index].scene;
-//                 g_camera = g_scene.children[0];
-//                 g_world = g_scene.children[2];
-//                 g_renderer = g_scene_objects[g_pog_index].renderer;
-//                 if (typeof g_pog_json[g_pog_index] !== "undefined" && g_all_pog_flag == "N") {
-//                     $s("P193_OPEN_POG_CODE", g_pog_json[g_pog_index].POGCode);
-//                     $s("P193_OPEN_POG_VERSION", g_pog_json[g_pog_index].Version);
-//                 }
-
-//                 if (typeof g_scene_objects[g_pog_index].Indicators !== "undefined") {
-//                     g_show_fixel_label = g_scene_objects[g_pog_index].Indicators.FixelLabel;
-//                     g_show_item_label = g_scene_objects[g_pog_index].Indicators.ItemLabel;
-//                     g_show_notch_label = g_scene_objects[g_pog_index].Indicators.NotchLabel;
-//                     g_show_max_merch = g_scene_objects[g_pog_index].Indicators.MaxMerch;
-//                     g_show_item_color = g_scene_objects[g_pog_index].Indicators.ItemColor;
-//                     g_show_item_desc = g_scene_objects[g_pog_index].Indicators.ItemDesc;
-//                     g_show_live_image = g_scene_objects[g_pog_index].Indicators.LiveImage;
-//                     g_show_days_of_supply = g_scene_objects[g_pog_index].Indicators.DaysOfSupply;
-//                     g_overhung_shelf_active = g_scene_objects[g_pog_index].Indicators.OverhungShelf; //ASA-1138
-//                     g_itemSubLabelInd = g_scene_objects[g_pog_index].Indicators.ItemSubLabelInd; //ASA-1182
-//                     g_itemSubLabel = g_scene_objects[g_pog_index].Indicators.ItemSubLabel; //ASA-1182
-//                 }
-
-//                 if (p_event.type == "mousedown" || p_event.type == "contextmenu" || p_event.type == "dblclick") {
-//                     var canvas_id = g_canvas.getAttribute("id");
-//                     $("[data-pog]").removeClass("multiPogList_active");
-//                     $(".canvas_highlight").removeClass("canvas_highlight");
-//                     $("#" + canvas_id + "-btns").addClass("canvas_highlight");
-//                     $("[data-indx=" + g_pog_index + "]").addClass("multiPogList_active");
-//                     g_all_pog_flag = "N";
-//                 }
-//             }
-//         }
-//     }
-// }
-
-// Moved to asw_common_functions.js
-//this function is used when minimize and maximize or close button when open more than one POG in same page. 
-//This will set the opened POG details into global variables.
-// function set_select_canvas(p_pog_index) {
-//     if (g_scene_objects.length > 0) {
-//         if (typeof g_scene_objects[p_pog_index] !== "undefined") {
-//             g_scene = g_scene_objects[p_pog_index].scene;
-//             g_camera = g_scene.children[0];
-//             g_world = g_scene.children[2];
-//             g_renderer = g_scene_objects[p_pog_index].renderer;
-//             $s("P193_OPEN_POG_CODE", g_pog_json[p_pog_index].POGCode);
-//             $s("P193_OPEN_POG_VERSION", g_pog_json[p_pog_index].Version);
-//             if (typeof g_scene_objects[p_pog_index].Indicators !== "undefined") {
-//                 g_show_fixel_label = g_scene_objects[p_pog_index].Indicators.FixelLabel;
-//                 g_show_item_label = g_scene_objects[p_pog_index].Indicators.ItemLabel;
-//                 g_show_notch_label = g_scene_objects[p_pog_index].Indicators.NotchLabel;
-//                 g_show_max_merch = g_scene_objects[p_pog_index].Indicators.MaxMerch;
-//                 g_show_item_color = g_scene_objects[p_pog_index].Indicators.ItemColor;
-//                 g_show_item_desc = g_scene_objects[p_pog_index].Indicators.ItemDesc;
-//                 g_show_live_image = g_scene_objects[p_pog_index].Indicators.LiveImage;
-//                 g_show_days_of_supply = g_scene_objects[p_pog_index].Indicators.DaysOfSupply;
-//                 g_overhung_shelf_active = g_scene_objects[p_pog_index].Indicators.OverhungShelf; //ASA-1138
-//                 g_itemSubLabelInd = g_scene_objects[g_pog_index].Indicators.ItemSubLabelInd; //ASA-1182
-//                 g_itemSubLabel = g_scene_objects[g_pog_index].Indicators.ItemSubLabel; //ASA-1182
-//             }
-
-//             if (typeof g_canvas_objects[p_pog_index] !== "undefined") {
-//                 var canvas_id = g_canvas_objects[p_pog_index].getAttribute("id");
-//                 $("[data-pog]").removeClass("multiPogList_active");
-//                 $(".canvas_highlight").removeClass("canvas_highlight");
-//                 $("#" + canvas_id + "-btns").addClass("canvas_highlight");
-//                 $("[data-indx=" + p_pog_index + "]").addClass("multiPogList_active");
-//                 g_all_pog_flag = "N";
-//             }
-//         }
-//     }
-// }
-
-// Moved to asw_common_functions.js
-// this function needs to be common
-async function appendMultiCanvasRowCol(p_pog_count, p_type = $v("P193_POGCR_TILE_VIEW"), p_appendFlag = "N", p_compareWith) {
-    console.log("dynamic rows cols");
-        if (typeof bindSplitterResizeSync === "function") {
-        bindSplitterResizeSync();
-    }
-    if (p_type == "H") {
-        $(".viewH").addClass("view_active");
-        $(".viewV").removeClass("view_active");
-    } else {
-        $(".viewV").addClass("view_active");
-        $(".viewH").removeClass("view_active");
-    }
-    g_windowHeight = window.innerHeight - 167;
-    // g_windowWidth = window.innerWidth - (side_nav_width + btn_cont_width);
-
-    //.css('width',windowWidth)
-    $("#canvas-holder .container").css("height", g_windowHeight + "px")
-    var containerH = $("#canvas-holder .container").height();;
-    var containerW = $("#canvas-holder .container").width();
-    console.log('appendMultiCanvasRowCol: p_pog_count=', p_pog_count, 'p_type=', p_type, 'containerH=', containerH, 'containerW=', containerW);
-    var rowCount = 1,
-        colCount = 1,
-        calcFlag = "Y",
-        pogCount = 0;
-    var currColCount,
-        pendingPogCount = p_pog_count,
-        compareApended = 0;
-
-    var divs = [];
-    $("[data-col]").each(function () {
-        var element = $(this)[0];
-        divs.push(element);
-    });
-    if (p_pog_count <= 3) {
-        calcFlag = "N";
-        currColCount = p_pog_count;
-
-        colCount = p_pog_count;
-    } else if (p_pog_count == 4) {
-        calcFlag = "N";
-        currColCount = 2;
-
-        colCount = 2;
-        rowCount = 2;
-    } else if (p_pog_count == 5 || p_pog_count == 6 || p_pog_count == 9) {
-        colCount = 3;
-        rowCount = Math.ceil(p_pog_count / colCount);
-    } else if (p_pog_count == 7 || p_pog_count == 8 || p_pog_count == 10 || p_pog_count == 11 || p_pog_count == 12 || p_pog_count == 16) {
-        colCount = 4;
-        rowCount = Math.ceil(p_pog_count / colCount);
-    } else if (p_pog_count == 13 || p_pog_count == 14 || p_pog_count == 15 || p_pog_count == 17 || p_pog_count == 18 || p_pog_count == 19 || p_pog_count == 20) {
-        colCount = 5;
-        rowCount = Math.ceil(p_pog_count / colCount);
-    } else {
-        colCount = 5;
-        rowCount = 5;
-    }
-
-    $("#canvas-holder .container").html("");
-    // g_canvas_objects = [];
-    // g_scene_objects = [];
-    if (p_type == "H") {
-        $("#canvas-holder .container").addClass("h-view").removeClass("v-view");
-    } else {
-        $("#canvas-holder .container").addClass("v-view").removeClass("h-view");
-    }
-    for (var i = 1; i <= rowCount; i++) {
-        $("#canvas-holder .container").append('<div class="row" data-row="' + i + '"></div>');
-
-        if (calcFlag == "Y") {
-            var res = pendingPogCount % (rowCount - i + 1);
-            if (res > 0) {
-                currColCount = colCount;
-            } else {
-                currColCount = pendingPogCount / (rowCount - i + 1);
-                calcFlag = "N";
-            }
-            pendingPogCount = pendingPogCount - currColCount; //colCount;
-        }
-        for (var j = 1; j <= currColCount; j++) {
-            var pogNo = pogCount == 0 ? "" : pogCount + 1;
-            var canvasName = "maincanvas" + pogNo;
-
-            if (p_appendFlag == "Y") {
-                if (p_compareWith == pogCount - 1) {
-                    $("[data-row=" + i + "]").append('<div class="canvas-content" id="' + canvasName + '-container" data-col="' + j + '" style="height:' + parseFloat((containerH / rowCount).toFixed(2)) + "px;width:" + parseFloat((containerW / currColCount).toFixed(2)) + 'px"><div class="canvas-buttons" id="' + canvasName + '-btns" ><span class="fa fa-close canvas-close" onClick="closePog(' + pogCount + ')"></span><span class="fa fa-window-maximize canvas-max" onClick="maximizePog(' + pogCount + ')"></span><span class="fa fa-minus canvas-min" onClick="minimizePog(' + pogCount + ')"></span></div><canvas class="canvasregion" data-canvas=true id="' + canvasName + '" ></canvas></div>');
-                    compareApended = 1;
-                    //ASA-1986  START
-                    try {
-                        var el = document.getElementById(canvasName);
-                        if (el) {
-                            el.setAttribute('data-indx', pogCount);
-                            if (g_canvas_objects.indexOf(el) === -1) g_canvas_objects.push(el);
-                        }
-                    } catch (e) { }
-                    //ASA-1986  end
-                } else {
-                    var currElmPos = pogCount - compareApended;
-                    var currElm = divs[currElmPos];
-
-                    $(currElm).attr("id", canvasName + "-container");
-                    $("[data-row=" + i + "]").append(currElm);
-
-                    var currElmId = $(currElm).attr("id");
-
-                    $("[data-row=" + i + "] #" + currElmId)
-                        .css("height", parseFloat((containerH / rowCount).toFixed(2)))
-                        .css("width", parseFloat((containerW / currColCount).toFixed(2)))
-                        .attr("data-col", j);
-
-                    $("[data-row=" + i + "] #" + currElmId + " .canvas-buttons").attr("id", canvasName + "-btns");
-                    $("[data-row=" + i + "] #" + currElmId + " .canvasregion").attr("id", canvasName);
-                    //ASA-1986  START
-                    try {
-                        var el = document.getElementById(canvasName);
-                        if (el) {
-                            el.setAttribute('data-indx', pogCount);
-                            if (g_canvas_objects.indexOf(el) === -1) g_canvas_objects.push(el);
-                        }
-                    } catch (e) { }
-                    //ASA-1986  end
-                }
-            } else {
-                var buttonHtml = "";
-                if (p_pog_count > 1) {
-                    buttonHtml = '<div class="canvas-buttons" id="maincanvas' + pogNo + '-btns" ><span class="fa fa-close canvas-close" onClick="closePog(' + pogCount + ')"></span></div>';
-                }
-                $("[data-row=" + i + "]").append('<div class="canvas-content" id="maincanvas' + pogNo + '-container" data-col="' + j + '" style="height:' + parseFloat((containerH / rowCount).toFixed(2)) + "px;width:" + parseFloat((containerW / currColCount).toFixed(2)) + 'px">' + buttonHtml + '<canvas class="canvasregion" data-canvas=true id="maincanvas' + pogNo + '" ></canvas></div>');
-                //ASA-1986  START
-                try {
-                    var el = document.getElementById(canvasName);
-                    if (el) {
-                        el.setAttribute('data-indx', pogCount);
-                        if (g_canvas_objects.indexOf(el) === -1) g_canvas_objects.push(el);
-                    }
-                } catch (e) { }
-                //ASA-1986  end
-            }
-            pogCount++;
-        }
-    }
-    if (p_appendFlag == "Y") {
-        var incr = 0;
-        for (var i = 1; i <= g_pog_json.length; i++) {
-            if (i !== 2) {
-                const pRenderer = g_renderer; //g_scene_objects[i - 1 - incr].renderer;
-                const pScene = g_scene_objects[i - 1 - incr].scene;
-                const pCamera = g_scene_objects[i - 1 - incr].scene.children.find((obj) => {
-                    return obj.type === "PerspectiveCamera";
-                });
-                var canvasName = "maincanvas" + (i == 1 ? "" : i);
-                var canvasContainerH = $("#" + canvasName)
-                    .parent()
-                    .height();
-                var canvasContainerW = $("#" + canvasName)
-                    .parent()
-                    .width();
-                var canvasBtns = $("#" + canvasName + "-btns")[0];
-                var canvasBtns_height = canvasBtns.offsetHeight;
-                var canvasWidthOrg = canvasContainerW;
-                var canvasHeightOrg = canvasContainerH - canvasBtns_height;
-
-                var pTanFOV = Math.tan(((Math.PI / 180) * pCamera.fov) / 2);
-                pCamera.aspect = canvasWidthOrg / canvasHeightOrg;
-                pCamera.fov = (360 / Math.PI) * Math.atan(pTanFOV);
-                pCamera.updateProjectionMatrix();
-                pRenderer.setSize(canvasWidthOrg, canvasHeightOrg);
-                //pRenderer.render(pScene, pCamera);
-                render(i);
-            } else if (i == 2) {
-                incr = 1;
-            }
-        }
-    }
-    makeResizableRow(); // Task 22510
+    logDebug("function : initiate_values_onload", "E");
 }
 
 //This is called at the beginning of the creation of POG. it will create canvas, scene, camera and assign into its related arrays.
@@ -1138,53 +686,13 @@ function init(p_canvasNo) {
         p_canvasNo = parseInt(p_canvasNo);
         //based on the canvas no the element is been fetched.
         if (p_canvasNo > 0) {
-            canvasName = "maincanvas" + (p_canvasNo + 1);
-        }
+            canvasName = "maincanvas" + (p_canvasNo + 1);        }
         g_canvas = document.getElementById(canvasName);
-        g_canvas.setAttribute("data-indx", p_canvasNo);
-
-        //assign draggable event to the canvas. this will help for product list drag items to POG.
-        $("#" + canvasName).droppable({
-            tolerance: "pointer",//ASA-1766
-            drop: function (event, ui) {
-                create_action(ui.helper.children(), event);
-                $("#draggable_table .a-GV-w-scroll tr.selected").removeClass("selected");
-            },
-        });
+        g_canvas.setAttribute("data-indx", p_canvasNo);    
         g_canvas_region = document.getElementById("drawing_region");
-        g_selection = document.getElementById("selection");
-        // g_renderer = new THREE.WebGLRenderer({
-        //     canvas: g_canvas,
-        //     antialias: true
-        // });
-
-        //  g_renderer = new THREE.WebGLRenderer({
-        //         antialias: true,
-        //         preserveDrawingBuffer: true
-        //     });
-        //     try{
-        //         // give the renderer canvas a deterministic id for debugging
-        //         g_renderer.domElement.id = 'threeRenderer' + p_canvasNo;
-        //         console.log('init: canvasName=', canvasName, 'g_canvas id=', g_canvas && g_canvas.id, 'renderer.domElement id=', g_renderer && g_renderer.domElement && g_renderer.domElement.id);
-        //     }catch(e){}
-        // try{
-        //         console.log('init: canvasName=', canvasName, 'g_canvas id=', g_canvas && g_canvas.id, 'renderer.domElement id=', g_renderer && g_renderer.domElement && g_renderer.domElement.id);
-        //     }catch(e){}
-
-        //add canvas details into the canvas array
-        //ASA-1986 canvas issue
-        //  try{
-        //     if (g_canvas_objects.indexOf(g_canvas) === -1) g_canvas_objects.push(g_canvas);
-        // }catch(e){}
-
-
-
-        // g_canvas_objects.push(g_canvas);
-        //   if (g_canvas_objects.indexOf(g_canvas) === -1) {
+        g_selection = document.getElementById("selection");     
         g_canvas_objects.push(g_canvas);
-        // }
 
-        //ASA-1986 end
         g_canvas.addEventListener("mousewheel", onDocumentMouseWheel, false);
     } catch (e) {
         document.getElementById("canvas-holder").innerHTML = "<p><b>Sorry, an error occurred:<br>" + e + "</b></p>";
@@ -1194,7 +702,6 @@ function init(p_canvasNo) {
     //This function will create scene and camera and push inside g_scene_objects array.
     createWorld();
     console.log("scene", g_scene.uuid, g_scene);
-
     //This is a feature from three js, through which we can identify which object is been clicked in mouse events.
     g_raycaster = new THREE.Raycaster();
     // render(0);
@@ -1218,14 +725,7 @@ function init(p_canvasNo) {
 
     g_selection.style.visibility = "hidden";
 
-    //set up mouse events and assign functions to be called on event firing.
-    //  if (p_event_ind == "Y") {
     setUpMouseHander("maincanvas", doMouseDown, doMouseMove, doMouseUp, doMouseDoubleclick, g_canvas);
-    //This function will create different div to keep different canvas in each boxes.
-    // }
-    // if (p_canvasNo > 0) {
-    //     makeResizableDiv(canvasName); //ASA-1107
-    // }
 
     g_tanFOV = Math.tan(((Math.PI / 180) * g_camera.fov) / 2);
     g_windowHeight = window.innerHeight - (header_height + top_bar_height + wtbar_height);
@@ -1235,40 +735,23 @@ function init(p_canvasNo) {
 
 
     var l_darwregionW = document.getElementById("drawing_region");
-    var l_offsetwidth = l_darwregionW.offsetWidth * devicePixelRatio;
-    // if (!parent) return {w:0,h:0};
-    // requestAnimationFrame(() => {
-    // const rect = parent.getBoundingClientRect();
-    // const w = rect.width || parent.offsetWidth;
-    // const h = rect.height || parent.offsetHeight;
-    // // use w,h (or call your render/setup)
-    // });
+    var l_offsetwidth = l_darwregionW.offsetWidth * devicePixelRatio;  
 
     var canvasContainerH = $("#" + canvasName).parent()[0].offsetHeight;
     var canvasContainerW = $("#" + canvasName).parent()[0].offsetWidth;
-    console.log("canvasContainerH", canvasContainerH, "canvasContainerW", canvasContainerW);
-    // var canvasParent = $("#" + canvasName).parent()[0];
-    // var canvasContainerH = canvasParent ? canvasParent.offsetHeight : 0;
-    // var canvasContainerW = canvasParent ? canvasParent.offsetWidth : 0;
-    // console.log("canvasContainerH", canvasContainerH, "canvasContainerW", canvasContainerW, 'parentPresent=', !!canvasParent);
+    console.log("canvasContainerH", canvasContainerH, "canvasContainerW", canvasContainerW);   
 
     var canvasBtns = $("#" + canvasName + "-btns")[0];
     var canvasBtns_height = typeof canvasBtns !== "undefined" ? canvasBtns.offsetHeight : 0;
     // var canvasWidthOrg = canvasContainerW;
     var canvasWidthOrg = typeof canvasContainerW == 0 ? canvasContainerW : l_offsetwidth;
     var canvasHeightOrg = canvasContainerH - canvasBtns_height;
-    $("#" + canvasName)
-        .css("height", canvasHeightOrg + "px !important")
-        .css("width", canvasWidthOrg + "px !important");
-    //  $("#" + canvasName).css({
-    //     height: canvasHeightOrg + "px",
-    //     width: canvasWidthOrg + "px",
-    // });
+    $("#" + canvasName).css("height", canvasHeightOrg + "px !important")
+    .css("width", canvasWidthOrg + "px !important");   
     g_canvas.width = canvasWidthOrg;
     g_canvas.height = canvasHeightOrg;
     g_camera.aspect = canvasWidthOrg / canvasHeightOrg;
     try { console.log('init: canvas set size ->', canvasWidthOrg, canvasHeightOrg, 'camera.aspect=', g_camera.aspect); } catch (e) { }
-
 
     // adjust the FOV
     g_camera.fov = (360 / Math.PI) * Math.atan(g_tanFOV);
@@ -1317,651 +800,6 @@ function init(p_canvasNo) {
     });
     onWindowResize("F");
     logDebug("function : init", "E");
-}
-
-// Moved to asw_common_functions.js
-//This function is assigned to event mousewheel.  this is majorly used to zoom in and out when ctrl key is pressed and do mouse scroll.
-// function onDocumentMouseWheel(p_event) {
-//     logDebug("function : onDocumentMouseWheel", "S");
-//     var jselector = g_canvas.getAttribute("id");
-//     console.log("jselector", jselector, p_event.target.nodeName, p_event.ctrlKey);
-//     if (p_event.target.nodeName == "CANVAS") {
-//         if (p_event.ctrlKey) {
-//             g_duplicating = "N";
-//             p_event.preventDefault();
-//             p_event.stopPropagation();
-//             g_manual_zoom_ind = "Y";
-//             var r = g_canvas.getBoundingClientRect();
-//             var x = p_event.clientX - r.left;
-//             var y = p_event.clientY - r.top;
-//             var factor = parseFloat($v("P193_POGCR_CAMERA_ZOOM_FACTOR"));
-//             var width = g_canvas.width / window.devicePixelRatio;
-//             var height = g_canvas.height / window.devicePixelRatio;
-//             var mX = (2 * x) / width - 1;
-//             var mY = 1 - (2 * y) / height;
-//             var vector = new THREE.Vector3(mX, mY, p_event.deltaY / 500);
-//             vector.unproject(g_camera);
-//             vector.sub(g_camera.position);
-//             if (p_event.deltaY < 0) {
-//                 $(jselector).css("cursor", "zoom-in");
-//                 g_camera.position.addVectors(g_camera.position, vector.setLength(factor));
-//             } else {
-//                 $(jselector).css("cursor", "zoom-out");
-//                 g_camera.position.subVectors(g_camera.position, vector.setLength(factor));
-//             }
-//             render(g_pog_index);
-//         } else {
-//             if (g_manual_zoom_ind == "Y") {
-//                 var scroll_interval = parseFloat($v("P193_POGCR_WHEEL_UP_DOWN_INTER"));
-
-//                 if (p_event.deltaY < 0) {
-//                     //up
-//                     g_camera.position.set(g_camera.position.x, g_camera.position.y + scroll_interval, g_camera.position.z);
-//                 } else if (p_event.deltaY > 0) {
-//                     //down
-//                     g_camera.position.set(g_camera.position.x, g_camera.position.y - scroll_interval, g_camera.position.z);
-//                 }
-//                 render(g_pog_index);
-//             }
-//         }
-//     }
-//     logDebug("function : onDocumentMouseWheel", "E");
-// }
-
-// Moved to asw_common_functions.js
-//add from wpd-3 needs to common
-// function set_indicator_objects(p_pog_index) {
-//     var ind_objects = {};
-//     ind_objects["FixelLabel"] = g_show_fixel_label;
-//     ind_objects["ItemLabel"] = g_show_item_label;
-//     ind_objects["NotchLabel"] = g_show_notch_label;
-//     ind_objects["MaxMerch"] = g_show_max_merch;
-//     ind_objects["ItemColor"] = g_show_item_color;
-//     ind_objects["ItemDesc"] = g_show_item_desc;
-//     ind_objects["LiveImage"] = g_show_live_image;
-//     ind_objects["DaysOfSupply"] = g_show_days_of_supply;
-//     ind_objects["OverhungShelf"] = g_overhung_shelf_active; //ASA-1138
-//     ind_objects["ItemSubLabelInd"] = g_itemSubLabelInd; //ASA-1182
-//     ind_objects["ItemSubLabel"] = g_itemSubLabel; //ASA-1182
-//     g_scene_objects[p_pog_index].Indicators = ind_objects;
-// }
-
-// from wpd-3 needs to common Moved from WPD 3 -> Addinial code for block need to handle as per pag3 193
-// async function getJson(p_new_pog_ind, p_pog_code, p_pog_version, p_recreate, p_create_json, p_camera, p_scene, p_canvasNo, p_imageLoadInd = "N", p_resetparam = "Y", p_pog_desc) {
-//     //ASA-1765 Added p_pog_desc #issue 5
-//     logDebug("function : getJson; new_pog_ind : " + p_new_pog_ind + "; pog_version : " + p_pog_version + "; recreate : " + p_recreate + "; create_json : " + p_create_json, "S");
-//     try {
-//         return new Promise(function (resolve, reject) {
-//             var process_name;
-//             var pog_opened = "N";
-//             var automate_ind = "N";
-//             var items_arr = [];
-
-//             if (p_new_pog_ind == "Y") {
-//                 //getting draft POG sm_pog_design
-//                 process_name = "GET_POG_JSON";
-//                 pog_opened = "N";
-//                 $s("P193_OPEN_POG_CODE", "");
-//             } else if (p_new_pog_ind == "T") {
-//                 //getting template from sm_pog_design
-//                 process_name = "OPEN_TEMPLATE";
-//                 pog_opened = "N";
-//                 $s("P193_OPEN_POG_CODE", "");
-//             } else {
-//                 //getting existing pog(here it can be a pog already opened and saved in WPD so a copy of json will be saved in sm_pog_design else
-//                 //if opening first time any pog when it will come from sm_pog, sm_pog_module,sm_pog_fixel, sm_pog_item_position)
-//                 process_name = "GET_EXISTING_POG";
-//                 pog_opened = "E";
-//                 //recreate = 'N';
-//             }
-//             var seq_id = -1;
-//             if (p_new_pog_ind == "Y") {
-//                 seq_id = p_pog_version;
-//             } else {
-//                 seq_id = p_pog_code;
-//             }
-//             var p = apex.server.process(
-//                 process_name,
-//                 {
-//                     x01: seq_id,
-//                     x02: p_pog_version,
-//                 },
-//                 {
-//                     dataType: "html",
-//                 }
-//             );
-//             // When the process is done, set the value to the page item
-//             p.done(function (data) {
-//                 var processed = "Y";
-//                 var return_data = $.trim(data);
-//                 try {
-//                     g_json = JSON.parse($.trim(data));
-//                 } catch {
-//                     processed = "N";
-//                 }
-//                 if (processed == "N") {
-//                     raise_error(return_data);
-//                     //ASA-1500
-//                     /*try {
-//                     raise_error(return_data);
-//                     } catch {
-//                     removeLoadingIndicator(regionloadWait);
-//                     }*/
-//                 } else if (return_data !== "") {
-//                     g_json = JSON.parse($.trim(data));
-//                     if (p_create_json == "Y") {
-//                         // g_pog_json_data.push(g_json[0]);
-//                         g_pog_json_data.push(JSON.parse(JSON.stringify(g_json[0]))); //Regression Issue 12 05082024
-//                         // ASA-1924 Issue-1 Start
-//                         // if (typeof p_pog_desc !== "Undefined") { 
-//                         // 	//ASA-1765 Added if/else to set Desc7  #issue 5
-//                         // 	g_pog_json_data[0].Desc7 = p_pog_desc;
-//                         // }       
-//                         // ASA-1924 Issue-1 End                 
-//                     } else {
-//                         g_pog_json_data = g_pog_json;
-//                     }
-//                     if (typeof g_pog_json_data !== "undefined") {
-//                         //recreate the orientation view if any present
-//                         async function recreate_view() {
-//                             if (p_new_pog_ind == "Y") {
-//                                 automate_ind = await get_draft_ind(seq_id); //ASA-1710 $v("P193_DRAFT_LIST")
-//                                 let draftVersion = await loadDraftVersion(seq_id); //ASA-1912
-//                                 g_pog_json_data[g_pog_index].draftVersion = draftVersion; //ASA-1912
-//                                 if (p_new_pog_ind == "Y" && automate_ind == "Y") {
-//                                     pog_opened = "E";
-//                                     p_new_pog_ind = "N";
-//                                 }
-//                             }
-//                             sessionStorage.setItem("new_pog_ind", p_new_pog_ind);
-//                             sessionStorage.setItem("pog_opened", pog_opened);
-//                             sessionStorage.setItem("POGExists", "Y");
-//                             //this function is used to set labels indicators by default BU Param.
-//                             // 1655 Added new param p_resetparam= 'Y' to not reset flags when called from PLANO GRAPH
-//                             if (p_resetparam == "Y") {
-//                                 await setDefaultState(p_new_pog_ind);
-//                             }
-
-//                             //this function will create the skeleton.
-//                             var return_val = await create_module_from_json(g_pog_json_data, p_new_pog_ind, "F", "N", pog_opened, "N" /* Stop Loading"Y"*/, "N", p_recreate, p_create_json, p_pog_version, "Y", p_camera, p_scene, g_pog_index, p_canvasNo, p_imageLoadInd);
-
-//                             if (p_new_pog_ind == "N" && automate_ind == "Y") {
-//                                 sessionStorage.setItem("new_pog_ind", "Y");
-//                             }
-
-//                             if (typeof g_pog_json !== "undefined" && g_pog_json.length > 0) {
-//                                 backupPog("F", -1, -1, g_pog_index);
-//                             }
-//                             if (g_compare_pog_flag == "Y" && g_compare_view !== "POG") {
-//                                 var returnval = await recreate_compare_views(g_compare_view, "N");
-//                             }
-//                             logDebug("function : getJson", "E");
-//                             resolve("SUCCESS");
-//                         }
-//                         recreate_view();
-//                     }
-//                     clearUndoRedoInfo();
-//                     g_dblclick_opened = "N";
-//                 }
-//             });
-//             console.log("blockList", g_mod_block_list);
-//         });
-//     } catch (err) {
-//         error_handling(err);
-//     }
-//   //Loading block after POG load
-//     try {
-//         if (Array.isArray(g_mod_block_list) && g_mod_block_list.length > 0) {
-//             for (const blkDet of g_mod_block_list) {
-//                 try {
-//                     // Draw only if BlockDim not present yet
-//                     if (typeof blkDet.BlockDim === 'undefined' || Object.keys(blkDet.BlockDim).length === 0) {
-//                         g_autofillModInfo = blkDet.BlkModInfo || [];
-//                         g_autofillShelfInfo = blkDet.BlkShelfInfo || [];
-//                         var retdtl = await colorAutofillBlock(blkDet["DragMouseStart"], blkDet["DragMouseEnd"], blkDet["mod_index"], blkDet["BlkColor"], blkDet["BlkName"], "U", blkDet, p_pog_index, "N");
-//                         blkDet["BlockDim"] = retdtl;
-//                     }
-//                 } catch (innerErr) {
-//                     error_handling(innerErr);
-//                 }
-//             }
-//         }
-//     } catch (err2) {
-//         error_handling(err2);
-//     }
-
-// }
-
-// from wpd_4 needs to common
-function clearUndoRedoInfo() {
-    try {
-        logDebug("function : clearUndoRedoInfo", "S");
-        g_undo_final_obj_arr = [];
-        g_redo_final_obj_arr = [];
-        g_undo_all_obj_arr = [];
-        g_redo_all_obj_arr = [];
-        g_undo_details = [];
-        g_delete_details = [];
-        g_multi_drag_shelf_arr = [];
-        g_multi_drag_item_arr = [];
-        g_cut_support_obj_arr = [];
-        g_cut_loc_arr = [];
-        g_cut_copy_arr = [];
-        g_undoRedoAction = "REDO";
-        logDebug("function : clearUndoRedoInfo", "E");
-    } catch (err) {
-        error_handling(err);
-    }
-}
-
-// Moved to asw_common_functions.js
-//This function will fire on event onwindowresize. this will check if the devicepixelratio is changed from previous. will try to recreated the 
-//POG according to new screen ratio.
-async function onWindowResize(p_event) {
-    logDebug("function : onWindowResize", "S");
-    try {
-        var header = document.getElementById("t_Header");
-        var breadcrumb = document.getElementById("t_Body_title");
-        var top_bar = document.getElementById("top_bar");
-        var side_nav = document.getElementById("t_Body_nav");
-        var button_cont = document.getElementById("wpdSplitter_splitter_first");
-        var wtbar = document.querySelector(".wtbar");
-        var devicePixelRatio = window.devicePixelRatio;
-
-        var header_height = header.offsetHeight * devicePixelRatio;
-        var breadcrumb_height = breadcrumb.offsetHeight * devicePixelRatio;
-        var top_bar_height = top_bar.offsetHeight * devicePixelRatio;
-        var side_nav_width = side_nav.offsetWidth * devicePixelRatio;
-        var btn_cont_width = button_cont.offsetWidth * devicePixelRatio;
-        var wtbar_height = wtbar.offsetHeight * devicePixelRatio;
-        var padding = parseFloat($(".t-Body-contentInner").css("padding-left").replace("px", ""));
-        if (devicePixelRatio > 2.5) {
-            g_windowHeight = window.innerHeight - (header_height + breadcrumb_height + top_bar_height / 2);
-            windowWidth = window.innerWidth - (side_nav_width + btn_cont_width + padding);
-        } else {
-            g_windowHeight = window.innerHeight - (header_height + breadcrumb_height + top_bar_height + top_bar_height + 10);
-            windowWidth = window.innerWidth - (side_nav_width + btn_cont_width + padding + 10);
-        }
-        g_tanFOV = Math.tan(((Math.PI / 180) * g_camera.fov) / 2);
-        var devicePixelRatio = window.devicePixelRatio;
-        console.log(" resizing ", g_start_pixel_ratio, devicePixelRatio);
-
-        //g_start_pixel_ratio will hold the devicepixelration when the POG was opened and also set this after ratio change.
-        if (g_start_pixel_ratio !== devicePixelRatio) {
-            var TEMP_POG = JSON.parse(JSON.stringify(g_pog_json));
-            g_pog_json = [];
-            //reset all the canvas with new ratio.
-            appendMultiCanvasRowCol(TEMP_POG.length, $v("P193_POGCR_TILE_VIEW"));
-
-            g_pog_index = 0;
-            g_multi_pog_json = [];
-            g_scene_objects = [];
-            g_canvas_objects = [];
-            addLoadingIndicator();
-            //loop through all the POG and recreate them in resized canvas.
-            for (var p = 0; p <= TEMP_POG.length - 1; p++) {
-                g_pog_index = p;
-                init(p);
-                objects = {};
-                objects["scene"] = g_scene;
-                objects["renderer"] = g_renderer;
-                g_scene_objects.push(objects);
-                var return_val = await create_module_from_json(TEMP_POG, sessionStorage.getItem("new_pog_ind"), "F", $v("P193_PRODUCT_BTN_CLICK"), sessionStorage.getItem("pog_opened"), "N", "N", "Y", "Y", "", "N", g_scene_objects[p].scene.children[0], g_scene_objects[p].scene, g_pog_index, p);
-                g_pog_index = p;
-                render(p);
-                animate_pog(p);
-            }
-            removeLoadingIndicator(regionloadWait);
-            g_pog_json = g_multi_pog_json;
-        }
-        g_renderer.render(g_scene, g_camera);
-        logDebug("function : onWindowResize", "E");
-    } catch (err) {
-        error_handling(err);
-    }
-}
-
-async function create_module_from_json(p_pog_json_arr, p_new_pog_ind, p_pog_type, p_product_open, p_pog_opened, p_stop_loading, p_create_pdf_ind, p_recreate, p_create_json, p_pog_version, p_save_pdf, p_camera, p_scene, p_pog_index, p_orgPogIndex, p_ImageLoadInd = "N", p_UpdateIndex = "N", p_old_POGJSON = []) {
-    debugger;
-    try {
-        typeof p_save_pdf == "undefined" ? "Y" : p_save_pdf;
-        load_orientation_json();
-        $("#LIVE_IMAGE").addClass("apex_disabled");
-        //Start ASA-1371_26842
-        if ($v('P193_POGCR_DFT_NOTCH_LABEL') == "Y") {
-            g_show_notch_label = 'Y';
-            //show_notch_labels("Y", $v("P36_NOTCH_HEAD"), "Y", p_pog_index);
-        }
-        if ($v('P193_POGCR_DFT_FIXEL_LABEL') == "Y") {
-            g_show_fixel_label = 'Y';
-            //show_fixel_labels("Y", p_pog_index);
-        }
-        if ($v('P193_POGCR_SHOW_DFLT_ITEM_LOC') == "Y") {
-            g_show_item_label = 'Y';
-            //show_item_labels("Y", $v("P36_POGCR_ITEM_NUM_LBL_COLOR"), $v("P36_POGCR_ITEM_NUM_LABEL_POS"), p_pog_index);
-        }
-        console.log("create_module_from_json:start", { p_pog_index: p_pog_index, g_canvas_objects_len: g_canvas_objects ? g_canvas_objects.length : 0, g_scene_objects_len: g_scene_objects ? g_scene_objects.length : 0, has_p_camera: typeof p_camera !== 'undefined', has_p_scene: typeof p_scene !== 'undefined' });
-        console.log("value", p_pog_json_arr,
-            p_new_pog_ind,
-            p_pog_type,
-            p_product_open,
-            p_pog_opened,
-            p_recreate,
-            p_create_json,
-            $v("P193_VDATE"),
-            $v("P193_POG_POG_DEFAULT_COLOR"),
-            $v("P193_POG_MODULE_DEFAULT_COLOR"),
-            p_pog_version,
-            true,
-            "N",
-            null,
-            $v("P193_POGCR_DFT_SPREAD_PRODUCT"),
-            parseFloat($v("P193_PEGB_DFT_HORIZ_SPACING")),
-            parseFloat($v("P193_PEGBOARD_DFT_VERT_SPACING")),
-            parseFloat($v("P193_BASKET_DFT_WALL_THICKNESS")),
-            parseFloat($v("P193_CHEST_DFT_WALL_THICKNESS")),
-            $v("P193_POGCR_PEGB_MAX_ARRANGE"),
-            $v("P193_POGCR_DEFAULT_WRAP_TEXT"),
-            parseInt($v("P193_POGCR_TEXT_DEFAULT_SIZE")),
-            $v("P193_POG_TEXTBOX_DEFAULT_COLOR"),
-            $v("P193_POG_SHELF_DEFAULT_COLOR"),
-            $v("P193_DIV_COLOR"),
-            $v("P193_SLOT_DIVIDER"),
-            $v("P193_SLOT_ORIENTATION"),
-            $v("P193_DIVIDER_FIXED"),
-            $v("P193_POG_ITEM_DEFAULT_COLOR"),
-            $v("P193_POGCR_DELIST_ITEM_DFT_COL"),
-            g_peg_holes_active,
-            $v("P193_POG_CP_SHELF_DFLT_COLOR"),
-            3,
-            $v("P193_MERCH_STYLE"),
-            $v("P193_POGCR_LOAD_IMG_FROM"),
-            $v("P193_BU_ID"),
-            $v("P193_POGCR_DELIST_ITEM_DFT_COL"),
-            $v("P193_POGCR_ITEM_NUM_LBL_COLOR"),
-            $v("P193_POGCR_DISPLAY_ITEM_INFO"),
-            $v("P193_POGCR_ITEM_NUM_LBL_COLOR"),
-            $v("P193_POGCR_ITEM_NUM_LABEL_POS"),
-            $v("P193_NOTCH_HEAD"),
-            "N",
-            $v("P193_POGCR_DFT_BASKET_FILL"),
-            $v("P193_POGCR_DFT_BASKET_SPREAD"),
-            p_camera,
-            p_pog_index,
-            p_orgPogIndex,
-            $v('P193_POGCR_NOTCH_START_VALUE'),
-            $v('P193_POGCR_MANUAL_CRUSH_ITEM'),
-            'Y', //ASA-1310 KUSH FIX
-            "");
-
-        console.log('create_module_from_json:start', p_pog_index, {
-            has_p_camera: !!p_camera,
-            p_camera_id: p_camera && p_camera.uuid,
-            has_p_scene: !!p_scene,
-            p_scene_children: p_scene ? p_scene.children.length : null,
-            global_scene_children: g_scene ? g_scene.children.length : null,
-            global_world_children: g_world ? g_world.children.length : null,
-            g_canvas_objects_len: g_canvas_objects ? g_canvas_objects.length : null,
-            g_scene_objects_len: g_scene_objects ? g_scene_objects.length : null
-        });
-        await create_module_from_json_lib(
-            p_pog_json_arr,
-            p_new_pog_ind,
-            p_pog_type,
-            p_product_open,
-            p_pog_opened,
-            p_recreate,
-            p_create_json,
-            $v("P193_VDATE"),
-            $v("P193_POG_POG_DEFAULT_COLOR"),
-            $v("P193_POG_MODULE_DEFAULT_COLOR"),
-            p_pog_version,
-            true,
-            "N",
-            null,
-            $v("P193_POGCR_DFT_SPREAD_PRODUCT"),
-            parseFloat($v("P193_PEGB_DFT_HORIZ_SPACING")),
-            parseFloat($v("P193_PEGBOARD_DFT_VERT_SPACING")),
-            parseFloat($v("P193_BASKET_DFT_WALL_THICKNESS")),
-            parseFloat($v("P193_CHEST_DFT_WALL_THICKNESS")),
-            $v("P193_POGCR_PEGB_MAX_ARRANGE"),
-            $v("P193_POGCR_DEFAULT_WRAP_TEXT"),
-            parseInt($v("P193_POGCR_TEXT_DEFAULT_SIZE")),
-            $v("P193_POG_TEXTBOX_DEFAULT_COLOR"),
-            $v("P193_POG_SHELF_DEFAULT_COLOR"),
-            $v("P193_DIV_COLOR"),
-            $v("P193_SLOT_DIVIDER"),
-            $v("P193_SLOT_ORIENTATION"),
-            $v("P193_DIVIDER_FIXED"),
-            $v("P193_POG_ITEM_DEFAULT_COLOR"),
-            $v("P193_POGCR_DELIST_ITEM_DFT_COL"),
-            g_peg_holes_active,
-            $v("P193_POG_CP_SHELF_DFLT_COLOR"),
-            3,
-            $v("P193_MERCH_STYLE"),
-            $v("P193_POGCR_LOAD_IMG_FROM"),
-            $v("P193_BU_ID"),
-            $v("P193_POGCR_DELIST_ITEM_DFT_COL"),
-            $v("P193_POGCR_ITEM_NUM_LBL_COLOR"),
-            $v("P193_POGCR_DISPLAY_ITEM_INFO"),
-            $v("P193_POGCR_ITEM_NUM_LBL_COLOR"),
-            $v("P193_POGCR_ITEM_NUM_LABEL_POS"),
-            $v("P193_NOTCH_HEAD"),
-            "N",
-            $v("P193_POGCR_DFT_BASKET_FILL"),
-            $v("P193_POGCR_DFT_BASKET_SPREAD"),
-            p_camera,
-            p_pog_index,
-            p_orgPogIndex,
-            $v('P193_POGCR_NOTCH_START_VALUE'),
-            $v('P193_POGCR_MANUAL_CRUSH_ITEM'),
-            'Y', //ASA-1310 KUSH FIX
-            ""); //Regression 29(Portal Issue) added p_calc_dayofsupply
-        console.log("create_module_from_json:done", { p_pog_index: p_pog_index, g_pog_json_len: g_pog_json ? g_pog_json.length : 0 });
-        // try {
-        //     console.log('g_world children', g_world ? g_world.children.length : 0);
-        // } catch (e) {
-        //     console.warn('g_world not available', e);
-        // }
-        // try {
-        //     // Force renderer size to current canvas and render once more to ensure draw
-        //     if (typeof g_canvas !== 'undefined' && g_canvas !== null && typeof g_renderer !== 'undefined' && g_renderer !== null) {
-        //         try {
-        //             g_renderer.setSize(g_canvas.width, g_canvas.height);
-        //         } catch (e) {
-        //             console.warn('setSize failed', e);
-        //         }
-        //         try {
-        //             g_renderer.render(g_scene, g_camera);
-        //         } catch (e) {
-        //             console.warn('forced render failed', e);
-        //         }
-        //     }
-        //     console.log('post-render debug', {
-        //         g_scene_children: g_scene ? g_scene.children.length : 0,
-        //         g_world_children: g_world ? g_world.children.length : 0,
-        //         camera_pos: g_camera ? { x: g_camera.position.x, y: g_camera.position.y, z: g_camera.position.z } : null,
-        //         canvas_attrs: g_canvas ? { width: g_canvas.width, height: g_canvas.height, clientWidth: g_canvas.clientWidth, clientHeight: g_canvas.clientHeight } : null
-        //     });
-        // } catch (e) {
-        //     console.warn('post-render debug failed', e);
-        // }
-        g_pog_json[p_pog_index].MassUpdate = "N"; //ASA-1809, Set this to N, as for saving POG draft or existing the coordinates in JSON has been update with respect to WPD
-
-        //This after refresh event is needed because Division/Dept/Subdept are cascading LOV and setting value is always removed by refresh
-        //due to setting value to master page item.
-        $("#P193_POG_SUBDEPT").on("apexafterrefresh", function () {
-            if (typeof g_pog_json[p_pog_index] != "undefined")
-                apex.item(this).setValue(g_pog_json[p_pog_index].SubDept);
-        });
-        $("#P193_POG_DEPT").on("apexafterrefresh", function () {
-            if (typeof g_pog_json[p_pog_index] != "undefined")
-                apex.item(this).setValue(g_pog_json[p_pog_index].Dept);
-        });
-
-        apex.item("P193_POG_DIVISION").setValue(g_pog_json[p_pog_index].Division);
-        // ASA-1500
-        // if (typeof regionloadWait !== "undefined" && regionloadWait !== null) {
-        //     if (p_stop_loading == "Y") {
-        //         removeLoadingIndicator(regionloadWait);
-        //     }
-        // }
-        //based on the POG getting created. set all label, live image button on or off and setup global varaibles for labels.
-        // if (p_create_pdf_ind == "N" && p_recreate == "Y" && p_orgPogIndex == p_pog_index) {
-        //     var res = await enableDisableFlags(p_pog_index);
-        // }
-        if (p_recreate == "Y") {
-            //this is the function will store the g_pog_json into a backup array for recreating the POG in any error.
-            if (typeof g_pog_json !== "undefined" && g_pog_json.length > 0) {
-                backupPog("F", -1, -1, p_pog_index);
-            }
-            //loading all the items for all items in g_ItemImages array to load images to item.
-            // if ($v("P193_POGCR_LOAD_IMG_FROM") == "DB" && p_product_open == "N" && p_create_pdf_ind == "N" && p_ImageLoadInd == "N") {
-            //     var retval = await get_all_images(p_pog_index, g_get_orient_images, "N", $v("P193_POGCR_IMG_MAX_WIDTH"), $v("P193_POGCR_IMG_MAX_HEIGHT"), $v("P193_IMAGE_COMPRESS_RATIO"));
-            // }
-            //This below part is used when user click Generate PDF. this will take the json from DB and create the POG skeleton and soon create PDF from it.
-            //This is because Generate PDF only uses data from table because it save the created PDF into sm_pog table.
-            if (p_stop_loading == "N" && p_create_pdf_ind == "Y") {
-                var draft_ind = p_pog_opened == "E" ? "E" : "D";
-
-                var p_pog_details = {
-                    'SeqNo': '',
-                    'POGCode': g_pog_json[p_pog_index].POGCode,
-                    'POGVersion': g_pog_json[p_pog_index].Version,
-                    'POGModule': '',
-                    'Selection_Type': draft_ind,
-                    'Print_Type': 'P',
-                    'SequenceId': '',
-                    'TemplateId': $v("P193_PDF_TEMPLATE").split('-')[0],
-                    'TemplateDetails': $v("P193_PDF_TEMPLATE")
-                };
-
-                //ASA-1870 passed values from $v("P193_POGCR_ENHANCE_PDF_IMG") to $v("P193_POGCR_BAY_WITHOUT_LIVE_IMAGE") to set_scene
-                var return_val = create_pdf(p_pog_details, p_save_pdf, "N", p_camera, draft_ind, $v("P193_POGCR_ITEM_NUM_LBL_COLOR"), $v("P193_POGCR_ITEM_NUM_LABEL_POS"), $v("P193_POGCR_DISPLAY_ITEM_INFO"), $v("P193_NOTCH_HEAD"), "Y", p_pog_index, "Y", g_all_pog_flag, $v("P193_MERCH_STYLE"), $v("P193_POGCR_LOAD_IMG_FROM"), $v("P193_BU_ID"), $v("P193_POGCR_ITEM_NUM_LBL_COLOR"), $v("P193_POGCR_ITEM_NUM_LABEL_POS"), $v("P193_POGCR_DISPLAY_ITEM_INFO"), $v("P193_POGCR_DELIST_ITEM_DFT_COL"), "", "", g_hide_show_dos_label, "",
-                    $v("P193_POGCR_ENHANCE_PDF_IMG"), $v("P193_POGCR_PDF_IMG_ENHANCE_RATIO"), $v("P193_POGCR_PDF_CANVAS_SIZE"), $v("P193_VDATE"), $v("P193_POG_POG_DEFAULT_COLOR"), $v("P193_POG_MODULE_DEFAULT_COLOR"), $v("P193_POGCR_DFT_SPREAD_PRODUCT"), $v("P193_PEGB_DFT_HORIZ_SPACING"), $v("P193_PEGBOARD_DFT_VERT_SPACING"), $v("P193_BASKET_DFT_WALL_THICKNESS"), $v("P193_CHEST_DFT_WALL_THICKNESS"), $v("P193_POGCR_PEGB_MAX_ARRANGE"), $v("P193_POGCR_DEFAULT_WRAP_TEXT"), $v("P193_POGCR_TEXT_DEFAULT_SIZE"), $v("P193_POG_TEXTBOX_DEFAULT_COLOR"), $v("P193_POG_SHELF_DEFAULT_COLOR"), $v("P193_DIV_COLOR"), $v("P193_SLOT_DIVIDER"), $v("P193_SLOT_ORIENTATION"), $v("P193_DIVIDER_FIXED"), $v("P193_POG_ITEM_DEFAULT_COLOR"), $v("P193_POGCR_DFT_BASKET_FILL"), $v("P193_POGCR_DFT_BASKET_SPREAD"), $v("P193_POGCR_BAY_LIVE_IMAGE"), $v("P193_POGCR_BAY_WITHOUT_LIVE_IMAGE"), "N"); //ASA-1427 $v('P193_POGCR_ITEM_DETAIL_LIST')
-            }
-
-            $(".live_image").css("color", "white").css("cursor", "pointer");
-            // $(".open_pdf").css("color", "black").attr("onclick", "open_pdf()").css("cursor", "pointer"); //Task_29818
-            $(".open_pdf").css("color", "black").css("cursor", "pointer");                                  //Task_29818
-            // $(".open_pdf_online").css("color", "black").attr("onclick", "open_pdf_online()").css("cursor", "pointer");  //Task_29818
-            $(".open_pdf_online").css("color", "black").css("cursor", "pointer");                                       //Task_29818            
-        }
-        if (g_ItemImages.length > 0 && g_show_live_image == "Y" && p_recreate == 'Y') {
-            try {
-                $(".live_image").addClass("live_image_active");
-                if (p_create_pdf_ind == "N" && p_product_open == "N" && $v("P193_POGCR_DFT_ITEM_DESC") == "N" && p_ImageLoadInd == "N") {
-                    var return_val = await recreate_image_items("Y", $v("P193_MERCH_STYLE"), $v("P193_POGCR_LOAD_IMG_FROM"), $v("P193_BU_ID"), $v("P193_POGCR_ITEM_NUM_LBL_COLOR"), $v("P193_POGCR_ITEM_NUM_LABEL_POS"), $v("P193_POGCR_DISPLAY_ITEM_INFO"), $v("P193_POGCR_DELIST_ITEM_DFT_COL"), $v("P193_NOTCH_HEAD"), p_pog_index, g_show_days_of_supply, $v("P193_POGCR_FONTSIZE_DAYSOFSUPP"), g_hide_show_dos_label);
-                    g_imagesShown = "Y";
-                }
-            } catch (err) {
-                error_handling(err);
-            }
-        }
-        if (g_isPogItemsSet == "N") {
-            set_pog_page_items(p_pog_index);
-        }
-        if (g_show_item_color == "Y") {
-            $(".item_color_legends").css("display", "block");
-        } else {
-            $(".item_color_legends").css("display", "none");
-        }
-
-        //ASA-1652 #3 Start
-        var modIdx = 0;
-        for (const modInfo of g_pog_json[p_pog_index].ModuleInfo) {
-            if (typeof modInfo.ParentModule == "undefined" || modInfo.ParentModule == null) {
-                var shelfIdx = 0;
-                for (const shelf of modInfo.ShelfInfo) {
-                    if (shelf.ObjType == "TEXTBOX") {
-                        var selObj = g_world.getObjectById(g_pog_json[p_pog_index].ModuleInfo[modIdx].ShelfInfo[shelfIdx].SObjID);
-                        //Regression Issue 7 20250117, added if condition
-                        if (typeof selObj !== "undefined") {
-                            selObj['ShelfInfo'] = g_pog_json[p_pog_index].ModuleInfo[modIdx].ShelfInfo[shelfIdx];
-                            textboxPriorityPlacing(selObj, p_pog_index, g_pog_json[p_pog_index].ModuleInfo[modIdx].ShelfInfo[shelfIdx].Z);
-                        }
-                    }
-                    shelfIdx++;
-                }
-            }
-            modIdx++;
-        }
-        //ASA-1652 #3 End
-        //ASA-1353 issue 3 --Task_27104 20240417
-        /*
-        //ASA-1157
-        if (typeof g_pog_json !== "undefined" && g_pog_json.length > 0 && p_recreate == 'Y') {
-        var m = 0;
-        var moduleCombInfo = g_pog_json[p_pog_index].ModuleInfo;
-        for (g_module of moduleCombInfo) {
-        var s = 0;
-        var shelfCombInfo = g_pog_json[p_pog_index].ModuleInfo[m].ShelfInfo;
-        for (shelf_info of shelfCombInfo) {//ASA-1350 issue 6 variable name change
-        if ((shelf_info.ObjType == "SHELF" || shelf_info.ObjType == "HANGINGBAR") && shelf_info.Combine !== "N") {
-        await generateCombinedShelfs(p_pog_index, m, s, $v("P193_POGCR_DELIST_ITEM_DFT_COL"), $v("P193_MERCH_STYLE"), $v("P193_POGCR_LOAD_IMG_FROM"), $v("P193_BU_ID"), $v("P193_POGCR_ITEM_NUM_LBL_COLOR"), $v("P193_POGCR_ITEM_NUM_LABEL_POS"), $v("P193_POGCR_DISPLAY_ITEM_INFO"), 'Y', "", "Y");//ASA-1350 issue 6 added parameters
-        }
-        s++;
-        }
-        m++;
-        }
-        }*/
-    } catch (err) {
-        error_handling(err);
-    }
-    return "SUCCESS";
-}
-
-// from wpd-4 
-function set_pog_page_items(p_pog_index) {
-    try {
-        logDebug("function : set_pog_page_items", "S");
-        apex.item("P193_POG_WIDTH").setValue((g_pog_json[p_pog_index].W * 100).toFixed(2));
-        apex.item("P193_POG_DEPTH").setValue((g_pog_json[p_pog_index].D * 100).toFixed(2));
-        apex.item("P193_BACK_DEPTH").setValue((g_pog_json[p_pog_index].BackDepth * 100).toFixed(2));
-        if ((g_pog_json[p_pog_index].SegmentW * 100).toFixed(2) !== "NaN") {
-            apex.item("P193_POG_SEGMENT_WIDTH").setValue((g_pog_json[p_pog_index].SegmentW * 100).toFixed(2));
-        }
-        apex.item("P193_TRAFFIC_FLOW").setValue(g_pog_json[p_pog_index].TrafficFlow);
-        apex.item("P193_POG_BASE_HEIGHT").setValue((g_pog_json[p_pog_index].BaseH * 100).toFixed(2));
-        apex.item("P193_POG_BASE_WIDTH").setValue((g_pog_json[p_pog_index].BaseW * 100).toFixed(2));
-        apex.item("P193_POG_BASE_DEPTH").setValue((g_pog_json[p_pog_index].BaseD * 100).toFixed(2));
-        apex.item("P193_POG_NOTCH_WIDTH").setValue((g_pog_json[p_pog_index].NotchW * 100).toFixed(2));
-        apex.item("P193_POG_NOTCH_START").setValue((g_pog_json[p_pog_index].NotchStart * 100).toFixed(2));
-        apex.item("P193_POG_NOTCH_SPACING").setValue((g_pog_json[p_pog_index].NotchSpacing * 100).toFixed(2));
-        apex.item("P193_POG_COLOR").setValue(g_pog_json[p_pog_index].Color);
-        apex.item("P193_HORZ_START").setValue((g_pog_json[p_pog_index].HorzStart * 100).toFixed(2));
-        apex.item("P193_HORZ_SPACING").setValue((g_pog_json[p_pog_index].HorzSpacing * 100).toFixed(2));
-        apex.item("P193_POG_VERT_START").setValue((g_pog_json[p_pog_index].VertStart * 100).toFixed(2));
-        apex.item("P193_POG_VERT_SPACING").setValue((g_pog_json[p_pog_index].VertSpacing * 100).toFixed(2));
-        apex.item("P193_ALLOW_OVERLAP").setValue(g_pog_json[p_pog_index].AllowOverlap);
-        apex.item("P193_SPECIAL_TYPE").setValue(g_pog_json[p_pog_index].SpecialType);
-        apex.item("P193_SPECIAL_TYPE_DESC").setValue(g_pog_json[p_pog_index].SpecialTypeDesc);
-        apex.item("P193_DISPLAY_METERAGE").setValue(g_pog_json[p_pog_index].DisplayMeterage);
-        apex.item("P193_RPT_METERAGE").setValue(g_pog_json[p_pog_index].RPTMeterage);
-        apex.item("P193_EFF_START_DATE").setValue(g_pog_json[p_pog_index].EffStartDate);
-        apex.item("P193_BRAND_GROUP_ID").setValue(g_pog_json[p_pog_index].BrandGroupID);
-        apex.item("P193_REMARKS").setValue(g_pog_json[p_pog_index].Remarks);
-        apex.item("P193_STORE_SEGMENT").setValue(g_pog_json[p_pog_index].StoreSegment);
-        apex.item("P193_DESC_7").setValue(g_pog_json[p_pog_index].Desc7);
-        apex.item("P193_AREA").setValue(g_pog_json[p_pog_index].Area);
-        apex.item("P193_PLN_DEPT").setValue(g_pog_json[p_pog_index].PLNDept);
-        g_isPogItemsSet = "Y";
-        logDebug("function : set_pog_page_items", "E");
-    } catch (err) {
-        error_handling(err);
-    }
-}
-
-
-async function create_shelf_edit_pog(p_mod_index, p_json_array, p_module_width, p_draft_ind, p_new_pog_ind, p_pog_type, p_carpark_ind, p_recreate, p_create_json, p_pog_index) {
-    logDebug("function : create_shelf_edit_pog; mod_index : " + p_mod_index + "; p_module_width : " + p_module_width + "; draft_ind : " + p_draft_ind + "; new_pog_ind : " + p_new_pog_ind + "; pog_type : " + p_pog_type + "; carpark_ind : " + p_carpark_ind + "; recreate : " + p_recreate, "S");
-    try {
-        var newObjectID = create_shelf_edit_pog_lib(p_mod_index, p_json_array, p_module_width, p_draft_ind, p_new_pog_ind, p_pog_type, p_carpark_ind, p_recreate, p_create_json, $v("P193_POGCR_DFT_SPREAD_PRODUCT"), $v("P193_POG_SHELF_DEFAULT_COLOR"), $v("P193_DIV_COLOR"), $v("P193_SLOT_DIVIDER"), $v("P193_SLOT_ORIENTATION"), $v("P193_DIVIDER_FIXED"), $v("P193_POG_ITEM_DEFAULT_COLOR"), $v("P193_POGCR_DELIST_ITEM_DFT_COL"), $v("P193_POG_CP_SHELF_DFLT_COLOR"), 3, $v("P193_MERCH_STYLE"), $v("P193_POGCR_LOAD_IMG_FROM"), $v("P193_BU_ID"), $v("P193_POGCR_DELIST_ITEM_DFT_COL"), $v("P193_POGCR_ITEM_NUM_LBL_COLOR"), $v("P193_POGCR_DISPLAY_ITEM_INFO"), $v("P193_POGCR_ITEM_NUM_LBL_COLOR"), $v("P193_POGCR_ITEM_NUM_LABEL_POS"), $v("P193_NOTCH_HEAD"), "Y", g_camera, p_pog_index, p_pog_index, $v('P193_POGCR_MANUAL_CRUSH_ITEM')); //ASA-1300
-
-        return newObjectID;
-    } catch (err) {
-        error_handling(err);
-    }
 }
 
 //This function is called when edit POG or try to create new POG from screen based on the segment width. the modules will be created.
@@ -2653,68 +1491,6 @@ async function add_pog(p_uuid, p_width, p_height, p_depth, p_color, p_color_hex,
     }
 }
 
-function add_pog_base(p_uuid, p_width, p_height, p_depth, p_color, p_x, p_y, p_edit_ind, p_pog_index) {
-    logDebug("function : add_pog_base; uuid : " + p_uuid + "; width : " + p_width + "; height : " + p_height + "; depth : " + p_depth + "; color : " + p_color + "; x : " + p_x + "; y : " + p_y + "; p_edit_ind : " + p_edit_ind, "S");
-    try {
-        if (p_edit_ind == "Y") {
-            var selectedObject = g_scene_objects[p_pog_index].scene.children[2].getObjectById(g_pog_json[p_pog_index].BaseObjID);
-            g_scene_objects[p_pog_index].scene.children[2].remove(selectedObject);
-        }
-
-        g_pog_base = new THREE.Mesh(
-            new THREE.BoxGeometry(p_width, p_height, 0.001),
-            new THREE.MeshStandardMaterial({
-                color: p_color,
-            }));
-        var l_wireframe_id = add_wireframe(g_pog_base, 2);
-        g_pog_base.position.x = p_x;
-        g_pog_base.position.y = p_y;
-        g_pog_base.position.z = 0;
-        g_pog_base.uuid = p_uuid;
-        g_scene_objects[p_pog_index].scene.children[2].add(g_pog_base);
-        g_pog_json[p_pog_index].BaseObjID = g_pog_base.id;
-        g_pog_json[p_pog_index].BaseX = p_x;
-        g_pog_json[p_pog_index].BaseY = p_y;
-        g_pog_json[p_pog_index].BaseZ = 0;
-        g_pog_json[p_pog_index].WFrameID = l_wireframe_id;
-        logDebug("function : add_pog_base", "E");
-    } catch (err) {
-        error_handling(err);
-    }
-}
-
-async function add_module(p_uuid, p_width, p_height, p_depth, p_color, p_x, p_y, p_edit_ind, p_pog_flag, p_vert_start, p_vert_spacing, p_horz_start, p_horz_spacing, p_recreate, p_camera, p_module_ind) {
-    try {
-        logDebug("function : add_module; uuid : " + p_uuid + "; width : " + p_width + "; height : " + p_height + "; depth : " + p_depth + "; color : " + p_color + "; x : " + p_x + "; y : " + p_y + "; p_edit_ind : " + p_edit_ind + "; pog_flag : " + p_pog_flag + "; vert_start : " + p_vert_start + "; vert_spacing : " + p_vert_spacing + "; horz_start : " + p_horz_start + "; horz_spacing : " + p_horz_spacing + "; recreate : " + p_recreate + "; module_ind : " + p_module_ind, "S");
-        var result;
-        result = await add_module_lib(p_uuid, p_width, p_height, p_depth, p_color, p_x, p_y, p_edit_ind, p_pog_flag, p_vert_start, p_vert_spacing, p_horz_start, p_horz_spacing, p_recreate, p_camera, p_module_ind, $v("P193_POGCR_DFT_SPREAD_PRODUCT"), parseFloat($v("P193_PEGB_DFT_HORIZ_SPACING")), parseFloat($v("P193_PEGBOARD_DFT_VERT_SPACING")), parseFloat($v("P193_BASKET_DFT_WALL_THICKNESS")), parseFloat($v("P193_CHEST_DFT_WALL_THICKNESS")), $v("P193_POGCR_PEGB_MAX_ARRANGE"), $v("P193_POGCR_DEFAULT_WRAP_TEXT"), parseInt($v("P193_POGCR_TEXT_DEFAULT_SIZE")), $v("P193_POG_TEXTBOX_DEFAULT_COLOR"), $v("P193_POG_SHELF_DEFAULT_COLOR"), $v("P193_DIV_COLOR"), $v("P193_SLOT_DIVIDER"), $v("P193_SLOT_ORIENTATION"), $("P193_DIVIDER_FIXED"), $v("P193_POG_ITEM_DEFAULT_COLOR"), $v("P193_POGCR_DELIST_ITEM_DFT_COL"), g_peg_holes_active, $v("P193_POG_CP_SHELF_DFLT_COLOR"), 3, $v("P193_MERCH_STYLE"), $v("P193_POGCR_LOAD_IMG_FROM"), $v("P193_BU_ID"), $v("P193_POGCR_DELIST_ITEM_DFT_COL"), $v("P193_POGCR_ITEM_NUM_LBL_COLOR"), $v("P193_POGCR_DISPLAY_ITEM_INFO"), $v("P193_POGCR_ITEM_NUM_LBL_COLOR"), $v("P193_POGCR_ITEM_NUM_LABEL_POS"), $v("P193_NOTCH_HEAD"), "Y", g_pog_index, $v("P193_POGCR_DFT_BASKET_FILL"), $v("P193_POGCR_DFT_BASKET_SPREAD"), $v('P193_POGCR_MANUAL_CRUSH_ITEM'));
-        $s("P193_MODULE_EDIT_IND", "N");
-        return result;
-    } catch (err) {
-        error_handling(err);
-    }
-}
-
-
-function clear_search_fields() {
-    logDebug("function : clear_search_fields", "S");
-    $s("P193_ITEM", "");
-    $s("P193_SUPP_NAME", "");
-    $s("P193_SUPPLIER_CODE", "");
-    $s("P193_MAIN_BRAND", "");
-    $s("P193_ITEM_DESCRIPTION", "");
-    $s("P193_DESCRIPTION_SEC", "");
-    $s("P193_GROUP", "");
-    $s("P193_DEPARTMENT", "");
-    $s("P193_ITEM_BRAND", "");
-    $s("P193_ITEM_WITHOUT_DIM", "N");
-    $s("P193_USED_ITEM", "A");
-    $s("P193_CLASS", "");        //ASA-1558 Task 1
-    $s("P193_SUB_CLASS", "");    //ASA-1558 Task 1
-    logDebug("function : clear_search_fields", "E");
-}
-
-
 function get_select_dim(p_items) {
     logDebug("function : get_select_dim", "S");
     var select_width = (select_height = select_depth = 0);
@@ -2796,6 +1572,7 @@ function check_dim_difference(p_module_index, p_shelf_index, p_item_index, p_pog
 
 //when edit a item and there is a dimension mismatch, this function will reset new dimension and continue editing of the product.
 async function org_dim_update_shelf(p_module_index, p_shelf_index, p_item_index, p_items, p_item_code, p_exclude_item, p_pog_index) {
+    logDebug("function : org_dim_update_shelf", "S");
     var nesting_val = 0;
     var success_ind = "N";
     var shelfs = g_pog_json[p_pog_index].ModuleInfo[p_module_index].ShelfInfo[p_shelf_index];
@@ -2850,7 +1627,8 @@ async function org_dim_update_shelf(p_module_index, p_shelf_index, p_item_index,
         selectedObject.DimUpdate = "E";
         selectedObject.BorderColour = g_dim_error_color;
     }
-    logDebug("function : after  color  " + p_item_code, "E");
+  
+    logDebug("function : org_dim_update_shelf", p_item_code,"E");
     return success_ind;
 }
 
@@ -3063,68 +1841,6 @@ function update_carpark_item_values(p_module_index, p_item_index, p_pog_index) {
     return "SUCCESS";
 }
 
-//When edit carpark items this function is called.
-async function edit_carpark_items(p_item_index, p_pog_index) {
-    logDebug("function : edit_carpark_items; i_item_index : " + p_item_index, "S");
-    var items = g_pog_json[p_pog_index].ModuleInfo[g_module_index].Carpark[0].ItemInfo[p_item_index];
-    var total_width = parseFloat($v("P193_ITEM_WIDTH")) / 100;
-    var shelfs = g_pog_json[p_pog_index].ModuleInfo[g_module_index].Carpark[0];
-    var j = 0;
-    for (const item_info of shelfs.ItemInfo) {
-        if (j !== p_item_index) {
-            var [item_width, item_height, item_depth, actualHeight, actualWidth, actualDepth] = get_new_orientation_dim(g_pog_json[p_pog_index].ModuleInfo[g_module_index].Carpark[0].ItemInfo[j].Orientation, item_info.W, item_info.H, item_info.D);
-            total_width += item_width;
-        }
-        j++;
-    }
-
-    if (total_width > shelfs.W) {
-        alert(get_message("LOST_FROM_SHELF_ERR_HORIZ", shelfs.Shelf));
-        logDebug("function : edit_carpark_items");
-        return false;
-    } else {
-        var returnval = update_carpark_item_values(g_module_index, p_item_index, p_pog_index);
-        var j = 0;
-        for (const item_info of g_pog_json[p_pog_index].ModuleInfo[g_module_index].Carpark[0].ItemInfo) {
-            var orientation = g_pog_json[p_pog_index].ModuleInfo[g_module_index].Carpark[0].ItemInfo[j].Orientation;
-            if (p_item_index == j) {
-                var [item_width, item_height, item_depth, actualHeight, actualWidth, actualDepth] = get_new_orientation_dim(orientation, item_info.W, item_info.H, item_info.D);
-            } else {
-                item_width = item_info.W;
-                item_height = item_info.H;
-                item_depth = item_info.D;
-            }
-            g_pog_json[p_pog_index].ModuleInfo[g_module_index].Carpark[0].ItemInfo[j].W = item_width;
-            g_pog_json[p_pog_index].ModuleInfo[g_module_index].Carpark[0].ItemInfo[j].H = item_height;
-            g_pog_json[p_pog_index].ModuleInfo[g_module_index].Carpark[0].ItemInfo[j].D = item_depth;
-            g_pog_json[p_pog_index].ModuleInfo[g_module_index].Carpark[0].ItemInfo[j].RW = item_width;
-            g_pog_json[p_pog_index].ModuleInfo[g_module_index].Carpark[0].ItemInfo[j].RH = item_height;
-            g_pog_json[p_pog_index].ModuleInfo[g_module_index].Carpark[0].ItemInfo[j].RD = item_depth;
-            if (j == 0) {
-                g_pog_json[p_pog_index].ModuleInfo[g_module_index].Carpark[0].ItemInfo[j].X = shelfs.X - shelfs.W / 2 + item_width / 2;
-            } else {
-                g_pog_json[p_pog_index].ModuleInfo[g_module_index].Carpark[0].ItemInfo[j].X = g_pog_json[p_pog_index].ModuleInfo[g_module_index].Carpark[0].ItemInfo[j - 1].X + g_pog_json[p_pog_index].ModuleInfo[g_module_index].Carpark[0].ItemInfo[j - 1].W / 2 + item_width / 2;
-            }
-            g_pog_json[p_pog_index].ModuleInfo[g_module_index].Carpark[0].ItemInfo[j].Y = shelfs.Y + shelfs.H / 2 + item_height / 2;
-            var selectedObject = g_scene_objects[p_pog_index].scene.children[2].getObjectById(item_info.ObjID);
-            g_scene_objects[p_pog_index].scene.children[2].remove(selectedObject);
-
-            var details = g_orientation_json[item_info.Orientation];
-            var details_arr = details.split("###");
-
-            var objID = await add_carpark_item(item_info.ItemID, item_info.W, item_info.H, item_info.D, item_info.Color, item_info.X, item_info.Y, item_info.Z, g_module_index, 0, j, "Y", "N", g_show_live_image, parseInt(details_arr[1]), p_pog_index);
-            g_pog_json[p_pog_index].ModuleInfo[g_module_index].Carpark[0].ItemInfo[j].ObjID = objID;
-            j = j + 1;
-        }
-        render(p_pog_index);
-        animate_all_pog(); //ASA-1418_27916
-        g_dblclick_opened = "N";
-        $s("P193_ITEM_EDIT_IND", "N");
-        logDebug("function : edit_carpark_items", "E");
-        return true;
-    }
-}
-
 //setting master data in each iteminfo which match the item had dimension mismatch.
 function set_dim_change_values(p_dim_details, p_item_code, p_pog_index) {
     try {
@@ -3226,326 +1942,6 @@ function set_dim_change_values(p_dim_details, p_item_code, p_pog_index) {
             }
         }
         logDebug("function : set_dim_change_values", "E");
-    } catch (err) {
-        error_handling(err);
-    }
-}
-
-//this function is used to get the item image when edit item and change orientation.
-async function get_edit_item_img(p_ModuleIndex, p_ShelfIndex, p_ItemIndex, p_items, p_Orientation, p_Merchstyle, p_pog_index) {
-    facing_edit = "N";
-    var img_index = -1;
-    var img_exists = "N";
-    var item_exists = "N";
-    var item_code = p_items.Item;
-    var details = g_orientation_json[p_Orientation];
-    var details_arr = details.split("###");
-    var j = 0;
-    for (const images_arr of g_ItemImages) {
-        if (item_code == images_arr.Item && details_arr[0] == images_arr.Orientation && p_Merchstyle == images_arr.MerchStyle) {
-            img_index = j;
-            break; //return false;
-        }
-        j++;
-    }
-    var module_details = g_pog_json[p_pog_index].ModuleInfo;
-    var i = 0;
-    for (modules of module_details) {
-        if (item_exists == "Y") {
-            break; //return false;
-        }
-        if (typeof modules.ParentModule == "undefined" || modules.ParentModule == null) {
-            if (modules.ShelfInfo.length > 0) {
-                var j = 0;
-                for (const shelfs of modules.ShelfInfo) {
-                    if (item_exists == "Y") {
-                        break; //return false;
-                    }
-                    if (shelfs.ObjType !== "BASE" && shelfs.ObjType !== "NOTCH" && shelfs.ObjType !== "DIVIDER" && shelfs.ObjType !== "TEXTBOX") {
-                        var k = 0;
-                        for (const items_info of shelfs.ItemInfo) {
-                            if (items_info.Orientation == details_arr[0] && items_info.Item == item_code && p_items.ObjID !== items_info.ObjID) {
-                                item_exists = "Y";
-                                break; //return false;
-                            }
-                            k++;
-                        }
-                    }
-                    j++;
-                }
-            }
-        }
-        i++;
-    }
-
-    if (img_exists == "N") {
-        ItemImageInfo = {};
-
-        if (img_index !== -1 && item_exists == "N") {
-            var return_val = await call_ajax(p_ModuleIndex, p_ShelfIndex, p_ItemIndex, details_arr[0], img_index, item_code, p_Merchstyle, parseFloat($v("P193_POGCR_IMG_MAX_WIDTH")), parseFloat($v("P193_POGCR_IMG_MAX_HEIGHT")), parseFloat($v("P193_IMAGE_COMPRESS_RATIO")));
-        } else {
-            ItemImageInfo["Item"] = p_items.Item;
-            ItemImageInfo["MIndex"] = p_ModuleIndex;
-            ItemImageInfo["SIndex"] = p_ShelfIndex;
-            ItemImageInfo["IIndex"] = p_ItemIndex;
-            ItemImageInfo["Orientation"] = details_arr[0];
-            ItemImageInfo["MerchStyle"] = p_Merchstyle;
-            ItemImageInfo["ItemImage"] = null;
-            g_ItemImages.push(ItemImageInfo);
-            var return_val = await call_ajax(p_ModuleIndex, p_ShelfIndex, p_ItemIndex, details_arr[0], g_ItemImages.length - 1, item_code, p_Merchstyle, parseFloat($v("P193_POGCR_IMG_MAX_WIDTH")), parseFloat($v("P193_POGCR_IMG_MAX_HEIGHT")), parseFloat($v("P193_IMAGE_COMPRESS_RATIO")));
-        }
-    }
-}
-
-
-function get_spread_gap(p_spread_product, p_module_index, p_shelf_index) {
-    logDebug("function : get_spread_gap; spread_product : " + p_spread_product + "; p_module_index : " + p_module_index + "; p_shelf_index : " + p_shelf_index, "S");
-    var shelfdtl = g_pog_json[p_pog_index].ModuleInfo[p_module_index].ShelfInfo[p_shelf_index];
-    var horiz_gap = shelfdtl.HorizGap;
-    var p_spread_product = shelfdtl.SpreadItem;
-    var total_item_width = 0,
-        spread_gap = 0,
-        item_cnt = 0,
-        items_arr = [];
-    var i = 0;
-    if (horiz_gap > 0) {
-        spread_gap = horiz_gap;
-    } else {
-        if (p_spread_product == "E") {
-            for (const items of shelfdtl.ItemInfo) {
-                total_item_width += items.W;
-                item_cnt = item_cnt + 1;
-                shelfdtl.ItemInfo[i].W = shelfdtl.ItemInfo[i].OW * items.BHoriz;
-                i++;
-            }
-
-            spread_gap = (shelfdtl.W + shelfdtl.LOverhang + shelfdtl.ROverhang - total_item_width) / (item_cnt - 1);
-        } else if (p_spread_product == "F") {
-            var items_arr = shelfdtl.ItemInfo;
-            var i = 0;
-            for (const items of items_arr) {
-                total_item_width += items.OW * items.BHoriz;
-                item_cnt = item_cnt + items.BHoriz;
-                i++;
-            }
-
-            spread_gap = (shelfdtl.W + shelfdtl.LOverhang + shelfdtl.ROverhang - total_item_width) / (item_cnt - 1);
-            var i = 0;
-            for (const items of items_arr) {
-                if (items.BHoriz > 1) {
-                    shelfdtl.ItemInfo[i].W = shelfdtl.ItemInfo[i].OW * items.BHoriz + spread_gap * (items.BHoriz - 1);
-                }
-                i++;
-            }
-        }
-    }
-    logDebug("function : get_spread_gap", "E");
-    return spread_gap;
-}
-
-//This function is not used anywhere currently. we can remove after confirmation.
-async function recreate_multi_items(p_module_index, p_shelf_index, p_shelf_obj_type, p_edit_ind, p_locationX, p_edit_item_index, p_item_length, p_fresh_item, p_shelf_edit, p_items, p_pog_index) {
-    logDebug("function : recreate_multi_items; p_module_index : " + p_module_index + "; p_shelf_index : " + p_shelf_index + "; shelf_obj_type : " + p_shelf_obj_type + "; p_edit_ind : " + p_edit_ind + "; locationX : " + p_locationX + "; edit_item_index : " + p_edit_item_index + "; item_length : " + p_item_length + "; shelf_edit : " + p_shelf_edit, "S");
-    try {
-        var shelfdtl = g_pog_json[p_pog_index].ModuleInfo[p_module_index].ShelfInfo[p_shelf_index];
-        var spread_gap = shelfdtl.HorizGap;
-        var horiz_gap = spread_gap;
-        var spread_product = shelfdtl.SpreadItem;
-        var combine_ind = shelfdtl.Combine;
-        var rotation = shelfdtl.Rotation;
-        var shelf_start_X = shelfdtl.X - shelfdtl.W / 2;
-        var shelf_start_Y = shelfdtl.Y - shelfdtl.H / 2;
-        var total_item_width = 0,
-            items_arr = [];
-        var finalX = 0;
-
-        if (typeof p_items !== "undefined") {
-            var items_arr = p_items;
-        } else {
-            var items_arr = shelfdtl.ItemInfo;
-        }
-
-        var item_cnt = items_arr.length;
-        var i = 0;
-
-        for (const items of items_arr) {
-            var selectedObject = g_world.getObjectById(items.ObjID);
-            g_world.remove(selectedObject);
-            total_item_width += items.W;
-            i++;
-        }
-        if (p_shelf_obj_type == "SHELF") {
-            shelfdtl.AvlSpace = wpdSetFixed(shelfdtl.W + shelfdtl.LOverhang + shelfdtl.ROverhang);
-        }
-        render(p_pog_index);
-
-        if (spread_product == "R") {
-            var items_arr = shelfdtl.ItemInfo;
-            for (var i = items_arr.length - 1; i >= 0; i--) {
-                item_cnt = item_cnt - 1;
-                finalX = get_item_xaxis(items_arr[i].W, items_arr[i].H, items_arr[i].D, p_shelf_obj_type, p_locationX, horiz_gap, spread_product, spread_gap, p_module_index, p_shelf_index, item_cnt, p_edit_ind, shelfdtl.ItemInfo.length, p_shelf_edit, p_pog_index);
-                if (items_arr[i].Item == "DIVIDER") {
-                    var shelf_arr = g_pog_json[p_pog_index].ModuleInfo[p_module_index].ShelfInfo;
-                    var div_index = -1;
-                    var ShelfInfo = {};
-                    var j = 0;
-                    for (const shelfs of shelf_arr) {
-                        if (shelfs.Shelf == items_arr[i].ItemID && shelfs.ObjType == "DIVIDER") {
-                            div_index = j;
-                        }
-                        j++;
-                    }
-                    g_pog_json[p_pog_index].ModuleInfo[p_module_index].ShelfInfo[div_index].X = finalX;
-                }
-
-                shelfdtl.ItemInfo[item_cnt].Distance = finalX - items_arr[i].W / 2 - shelf_start_X;
-                if (shelfdtl.ObjType == "PEGBOARD") {
-                    shelfdtl.ItemInfo[item_cnt].PegBoardX = finalX - items_arr[i].W / 2 - shelf_start_X;
-                    shelfdtl.ItemInfo[item_cnt].PegBoardY = shelfdtl.ItemInfo[item_cnt].Y - items_arr[i].H / 2 - shelf_start_Y;
-                    shelfdtl.ItemInfo[item_cnt].FromProductList = "N";
-                }
-                shelfdtl.ItemInfo[item_cnt].OldObjID = items_arr[i].ObjID;
-                var old_obj_id = items_arr[i].ObjID;
-
-                if (g_show_live_image == "Y" && items_arr[i].Item !== "DIVIDER") {
-                    var details = g_orientation_json[shelfdtl.ItemInfo[item_cnt].Orientation];
-                    var details_arr = details.split("###");
-                    var objID = await add_items_with_image(items_arr[i].ItemID, items_arr[i].W, items_arr[i].H, items_arr[i].D, items_arr[i].Color, finalX, items_arr[i].Y, "", p_module_index, p_shelf_index, i, items_arr[i].BHoriz, items_arr[i].BVert, items_arr[i].Item, parseInt(details_arr[0]), parseInt(details_arr[1]), "N", p_fresh_item, $v("P193_MERCH_STYLE"), $v("P193_POGCR_LOAD_IMG_FROM"), $v("P193_BU_ID"), $v("P193_POGCR_ITEM_NUM_LBL_COLOR"), $v("P193_POGCR_ITEM_NUM_LABEL_POS"), $v("P193_POGCR_DISPLAY_ITEM_INFO"), p_pog_index);
-                } else {
-                    if (items_arr[i].Item == "DIVIDER") {
-                        var objID = add_items(items_arr[i].ItemID, items_arr[i].W, items_arr[i].H, items_arr[i].D, items_arr[i].Color, finalX, items_arr[i].Y, "", p_module_index, p_shelf_index, i, items_arr[i].Rotation, p_pog_index);
-                    } else {
-                        var objID = await add_items_prom(items_arr[i].ItemID, items_arr[i].W, items_arr[i].H, items_arr[i].D, items_arr[i].Color, finalX, items_arr[i].Y, "", p_module_index, p_shelf_index, i, "N", p_fresh_item, $v("P193_POGCR_DELIST_ITEM_DFT_COL"), $v("P193_POGCR_ITEM_NUM_LBL_COLOR"), $v("P193_POGCR_DISPLAY_ITEM_INFO"), $v("P193_POGCR_ITEM_NUM_LBL_COLOR"), $v("P193_POGCR_ITEM_NUM_LABEL_POS"), p_pog_index);
-                    }
-                }
-                if (items_arr[i].DimUpdate == "E") {
-                    var selectedObject = g_world.getObjectById(objID);
-                    selectedObject.WireframeObj.material.color.setHex(0xff0000);
-                }
-                var l_final_z = 0;
-                if (shelfdtl.ObjType == "PEGBOARD") {
-                    l_final_z = shelfdtl.Z + shelfdtl.D / 2 + items_arr[i].D / 2;
-                } else {
-                    l_final_z = 0.001 + shelfdtl.D / 1000;
-                }
-                shelfdtl.ItemInfo[i].X = finalX;
-                shelfdtl.ItemInfo[i].Z = l_final_z;
-                shelfdtl.ItemInfo[i].ObjID = objID;
-                shelfdtl.ItemInfo[i].CType = shelfdtl.ObjType;
-
-                if ((typeof items_arr[i].TopObjID !== "undefined" && items_arr[i].TopObjID !== "") || (typeof items_arr[i].BottomObjID !== "undefined" && items_arr[i].BottomObjID !== "")) {
-                    var tier_ind;
-                    if (items_arr[i].TopObjID !== "" && typeof items_arr[i].TopObjID !== "undefined") {
-                        tier_ind = "BOTTOM";
-                    } else {
-                        tier_ind = "TOP";
-                    }
-                    var returnval = reset_top_bottom_obj_id(tier_ind, old_obj_id, objID, finalX, "N", p_pog_index);
-                }
-
-                if (items_arr[i].Item == "DIVIDER") {
-                    g_pog_json[p_pog_index].ModuleInfo[p_module_index].ShelfInfo[div_index].ShelfDivObjID = objID;
-                }
-            }
-        } else {
-            var i = 0;
-            var items_arr = shelfdtl.ItemInfo;
-            for (const items of items_arr) {
-                finalX = get_item_xaxis(items.W, items.H, items.D, p_shelf_obj_type, p_locationX, horiz_gap, spread_product, spread_gap, p_module_index, p_shelf_index, i, p_edit_ind, shelfdtl.ItemInfo.length, p_shelf_edit, p_pog_index);
-                if (items.Item == "DIVIDER") {
-                    var shelf_arr = g_pog_json[p_pog_index].ModuleInfo[p_module_index].ShelfInfo;
-                    var div_index = -1;
-                    var ShelfInfo = {};
-                    var j = 0;
-                    for (const shelfs of shelf_arr) {
-                        //$.each(shelf_arr, function (j, shelfs) {
-                        if (shelfs.Shelf == items.ItemID && shelfs.ObjType == "DIVIDER") {
-                            div_index = j;
-                        }
-                        // });
-                        j++;
-                    }
-                    g_pog_json[p_pog_index].ModuleInfo[p_module_index].ShelfInfo[div_index].X = finalX;
-                }
-                shelfdtl.ItemInfo[i].Distance = finalX - items.W / 2 - shelf_start_X;
-                if (shelfdtl.ObjType == "PEGBOARD") {
-                    shelfdtl.ItemInfo[i].PegBoardX = finalX - items.W / 2 - shelf_start_X;
-                    shelfdtl.ItemInfo[i].PegBoardY = shelfdtl.ItemInfo[i].Y - items.H / 2 - shelf_start_Y;
-                    shelfdtl.ItemInfo[i].FromProductList = "N";
-                }
-                shelfdtl.ItemInfo[i].OldObjID = items.ObjID;
-                var old_obj_id = items.ObjID;
-                if (g_show_live_image == "Y" && items.Item !== "DIVIDER") {
-                    var details = g_orientation_json[shelfdtl.ItemInfo[i].Orientation];
-                    var details_arr = details.split("###");
-                    var objID = await add_items_with_image(items.ItemID, items.W, items.H, items.D, items.Color, finalX, shelfdtl.ItemInfo[i].Y, "", p_module_index, p_shelf_index, i, items.BHoriz, items.BVert, items.Item, parseInt(details_arr[0]), parseInt(details_arr[1]), "N", p_fresh_item, $v("P193_MERCH_STYLE"), $v("P193_POGCR_LOAD_IMG_FROM"), $v("P193_BU_ID"), $v("P193_POGCR_ITEM_NUM_LBL_COLOR"), $v("P193_POGCR_ITEM_NUM_LABEL_POS"), $v("P193_POGCR_DISPLAY_ITEM_INFO"), p_pog_index);
-                } else {
-                    if (items.Item == "DIVIDER") {
-                        var objID = add_items(items.ItemID, items.W, items.H, items.D, items.Color, finalX, items.Y, "", p_module_index, p_shelf_index, i, items.Rotation, p_pog_index);
-                    } else {
-                        var objID = await add_items_prom(items.ItemID, items.W, items.H, items.D, items.Color, finalX, shelfdtl.ItemInfo[i].Y, "", p_module_index, p_shelf_index, i, "N", p_fresh_item, $v("P193_POGCR_DELIST_ITEM_DFT_COL"), $v("P193_POGCR_ITEM_NUM_LBL_COLOR"), $v("P193_POGCR_DISPLAY_ITEM_INFO"), $v("P193_POGCR_ITEM_NUM_LBL_COLOR"), $v("P193_POGCR_ITEM_NUM_LABEL_POS"), p_pog_index);
-                    }
-                }
-                if (items.DimUpdate == "E") {
-                    var selectedObject = g_world.getObjectById(objID);
-                    selectedObject.WireframeObj.material.color.setHex(0xff0000);
-                }
-                if (shelfdtl.ObjType == "PEGBOARD") {
-                    l_final_z = shelfdtl.Z + shelfdtl.D / 2 + items.D / 2;
-                } else {
-                    l_final_z = 0.001 + shelfdtl.D / 1000;
-                }
-
-                shelfdtl.ItemInfo[i].X = finalX;
-                shelfdtl.ItemInfo[i].Z = l_final_z;
-                shelfdtl.ItemInfo[i].ObjID = objID;
-                shelfdtl.ItemInfo[i].CType = shelfdtl.ObjType;
-                if ((typeof items.TopObjID !== "undefined" && items.TopObjID !== "") || (typeof items.BottomObjID !== "undefined" && items.BottomObjID !== "")) {
-                    var tier_ind;
-                    if (items.TopObjID !== "" && typeof items.TopObjID !== "undefined") {
-                        tier_ind = "BOTTOM";
-                    } else {
-                        tier_ind = "TOP";
-                    }
-                    var returnval = reset_top_bottom_obj_id(tier_ind, old_obj_id, objID, finalX, "N", p_pog_index);
-                }
-
-                if (items.Item == "DIVIDER") {
-                    g_pog_json[p_pog_index].ModuleInfo[p_module_index].ShelfInfo[div_index].ShelfDivObjID = objID;
-                }
-                i = i + 1;
-            }
-        }
-        async function doSomething() {
-            var res = await update_undo_redo_objID(g_pog_json); //yograj
-            //}
-        }
-        doSomething();
-
-        var items_arr = shelfdtl.ItemInfo;
-        i = 0;
-        for (const items of items_arr) {
-            if ((typeof items.TopObjID !== "undefined" && items.TopObjID !== "") || (typeof items.BottomObjID !== "undefined" && items.BottomObjID !== "")) {
-                var tier_ind;
-                if (items.TopObjID !== "" && typeof items.TopObjID !== "undefined") {
-                    tier_ind = "BOTTOM";
-                } else {
-                    tier_ind = "TOP";
-                }
-                var returnval = reset_top_bottom_obj_id(tier_ind, items.OldObjID, items.ObjID, items.X, "Y", p_pog_index);
-            }
-            i = i + 1;
-        }
-        if (shelfdtl.ObjType == "SHELF" || shelfdtl.ObjType == "PALLET") {
-            var returnval = reset_top_bottom_objects(p_module_index, p_shelf_index, "N", p_pog_index);
-        }
-
-        //  }
-        render(p_pog_index);
-        g_item_edit_flag = "";
-        g_item_index = "";
-        logDebug("function : recreate_multi_items", "E");
-        return finalX;
     } catch (err) {
         error_handling(err);
     }
@@ -5860,51 +4256,6 @@ function get_shelf_item_ind(p_module_index, p_shelf_index, p_obj_id, p_pog_index
     return g_item_index;
 }
 
-//This function is used to get the quantity column for basket edit. 
-function get_basket_fill_count(p_module_index, p_shelf_index, p_basket_spread, p_basket_fill, p_shelf_width, p_max_merch, p_shelf_depth, p_pog_index) {
-    logDebug("function : get_basket_fill_count; p_module_index : " + p_module_index + "; p_shelf_index : " + p_shelf_index + "; basket_spread : " + p_basket_spread + "; basket_fill : " + p_basket_fill + "; shelf_width : " + p_shelf_width + "; max_merch : " + p_max_merch + "; shelf_depth : " + p_shelf_depth, "S");
-    var items_arr = g_pog_json[p_pog_index].ModuleInfo[p_module_index].ShelfInfo[p_shelf_index].ItemInfo;
-    var wall_thick = g_pog_json[p_pog_index].ModuleInfo[p_module_index].ShelfInfo[p_shelf_index].BsktWallThickness * 2;
-    var fb_depth = wpdSetFixed(p_shelf_depth - wall_thick);//.toFixed(2));
-    var total_depth = 0;
-    var quantity = 0;
-    for (const items of items_arr) {
-        if (items.Item !== "DIVIDER") {
-            total_depth = total_depth + items.D;
-            console.log("items.D", items, items.D, total_depth);
-        }
-    }
-    if (p_basket_fill == "F") {
-        if (p_basket_spread == "LR") {
-            for (i = 1; i < 1000; i++) {
-                if (total_depth * i > p_shelf_width) {
-                    quantity = i - 1;
-                    break;
-                }
-            }
-        } else if (p_basket_spread == "BT") {
-            for (i = 1; i < 1000; i++) {
-                if (total_depth * i > p_max_merch) {
-                    quantity = i - 1;
-                    break;
-                }
-            }
-        } else if (p_basket_spread == "FB") {
-            for (i = 1; i < 1000; i++) {
-                if (total_depth * i > fb_depth) {
-                    quantity = i - 1;
-                    break;
-                }
-            }
-        }
-    }
-    if (quantity == 0) {
-        quantity = 1;
-    }
-    logDebug("function : get_basket_fill_count", "E");
-    return quantity;
-}
-
 function get_min_shelf(p_module_index, p_final_y, p_pog_index) {
     logDebug("function : get_min_shelf; p_module_index : " + p_module_index + "; p_final_y : " + p_final_y, "S");
     var shelf_arr = g_pog_json[p_pog_index].ModuleInfo[p_module_index].ShelfInfo;
@@ -5934,6 +4285,7 @@ function get_min_shelf(p_module_index, p_final_y, p_pog_index) {
     logDebug("function : get_min_shelf", "E");
     return div_shelf_index + "," + shelf_found;
 }
+
 //ASA-1386
 //This function is used in mouse up and multi_drag_setup. this is used to reset the crush perc to newly dragged place and then do the 
 //processing of each item. basically we are setting everything to 0 and then call the crushitem again from scratch to crush again based on 
@@ -6597,168 +4949,7 @@ function get_curr_module(p_final_x, p_final_y, p_shelf_edit_flag, p_module_index
     }
 }
 
-("use strict");
-
-// class DisclosureNav {
-//     constructor(domNode) {
-//         this.rootNode = domNode;
-//         this.controlledNodes = [];
-//         this.openIndex = null;
-//         this.useArrowKeys = true;
-//         this.topLevelNodes = [...this.rootNode.querySelectorAll(".main-link, button[aria-expanded][aria-controls]")];
-
-//         this.topLevelNodes.forEach((node) => {
-//             // handle button + menu
-//             if (node.tagName.toLowerCase() === "button" && node.hasAttribute("aria-controls")) {
-//                 const menu = node.parentNode.querySelector("ul");
-//                 if (menu) {
-//                     // save ref controlled menu
-//                     this.controlledNodes.push(menu);
-
-//                     // collapse menus
-//                     node.setAttribute("aria-expanded", "false");
-//                     this.toggleMenu(menu, false);
-
-//                     // attach event listeners
-//                     menu.addEventListener("keydown", this.onMenuKeyDown.bind(this));
-//                     node.addEventListener("click", this.onButtonClick.bind(this));
-//                     node.addEventListener("keydown", this.onButtonKeyDown.bind(this));
-//                 }
-//             }
-//             // handle links
-//             else {
-//                 this.controlledNodes.push(null);
-//                 node.addEventListener("keydown", this.onLinkKeyDown.bind(this));
-//             }
-//         });
-
-//         this.rootNode.addEventListener("focusout", this.onBlur.bind(this));
-//     }
-
-//     controlFocusByKey(keyboardEvent, nodeList, currentIndex) {
-//         switch (keyboardEvent.key) {
-//             case "ArrowUp":
-//             case "ArrowLeft":
-//                 keyboardEvent.preventDefault();
-//                 if (currentIndex > -1) {
-//                     var prevIndex = Math.max(0, currentIndex - 1);
-//                     nodeList[prevIndex].focus();
-//                 }
-//                 break;
-//             case "ArrowDown":
-//             case "ArrowRight":
-//                 keyboardEvent.preventDefault();
-//                 if (currentIndex > -1) {
-//                     var nextIndex = Math.min(nodeList.length - 1, currentIndex + 1);
-//                     nodeList[nextIndex].focus();
-//                 }
-//                 break;
-//             case "Home":
-//                 keyboardEvent.preventDefault();
-//                 nodeList[0].focus();
-//                 break;
-//             case "End":
-//                 keyboardEvent.preventDefault();
-//                 nodeList[nodeList.length - 1].focus();
-//                 break;
-//         }
-//     }
-
-//     // public function to close open menu
-//     close() {
-//         this.toggleExpand(this.openIndex, false);
-//     }
-
-//     onBlur(event) {
-//         var menuContainsFocus = this.rootNode.contains(event.relatedTarget);
-//         if (!menuContainsFocus && this.openIndex !== null) {
-//             this.toggleExpand(this.openIndex, false);
-//         }
-//     }
-
-//     onButtonClick(event) {
-//         var button = event.target;
-//         var buttonIndex = this.topLevelNodes.indexOf(button);
-//         var buttonExpanded = button.getAttribute("aria-expanded") === "true";
-//         this.toggleExpand(buttonIndex, !buttonExpanded);
-//     }
-
-//     onButtonKeyDown(event) {
-//         var targetButtonIndex = this.topLevelNodes.indexOf(document.activeElement);
-
-//         // close on escape
-//         if (event.key === "Escape") {
-//             this.toggleExpand(this.openIndex, false);
-//         }
-
-//         // move focus into the open menu if the current menu is open
-//         else if (this.useArrowKeys && this.openIndex === targetButtonIndex && event.key === "ArrowDown") {
-//             event.preventDefault();
-//             this.controlledNodes[this.openIndex].querySelector("a").focus();
-//         }
-
-//         // handle arrow key navigation between top-level buttons, if set
-//         else if (this.useArrowKeys) {
-//             this.controlFocusByKey(event, this.topLevelNodes, targetButtonIndex);
-//         }
-//     }
-
-//     onLinkKeyDown(event) {
-//         var targetLinkIndex = this.topLevelNodes.indexOf(document.activeElement);
-
-//         // handle arrow key navigation between top-level buttons, if set
-//         if (this.useArrowKeys) {
-//             this.controlFocusByKey(event, this.topLevelNodes, targetLinkIndex);
-//         }
-//     }
-
-//     onMenuKeyDown(event) {
-//         if (this.openIndex === null) {
-//             return;
-//         }
-
-//         var menuLinks = Array.prototype.slice.call(this.controlledNodes[this.openIndex].querySelectorAll("a"));
-//         var currentIndex = menuLinks.indexOf(document.activeElement);
-
-//         // close on escape
-//         if (event.key === "Escape") {
-//             this.topLevelNodes[this.openIndex].focus();
-//             this.toggleExpand(this.openIndex, false);
-//         }
-
-//         // handle arrow key navigation within menu links, if set
-//         else if (this.useArrowKeys) {
-//             this.controlFocusByKey(event, menuLinks, currentIndex);
-//         }
-//     }
-
-//     toggleExpand(index, expanded) {
-//         // close open menu, if applicable
-//         if (this.openIndex !== index) {
-//             this.toggleExpand(this.openIndex, false);
-//         }
-
-//         // handle menu at called index
-//         if (this.topLevelNodes[index]) {
-//             this.openIndex = expanded ? index : null;
-//             this.topLevelNodes[index].setAttribute("aria-expanded", expanded);
-//             this.toggleMenu(this.controlledNodes[index], expanded);
-//         }
-//     }
-
-//     toggleMenu(domNode, show) {
-//         if (domNode) {
-//             domNode.style.display = show ? "block" : "none";
-//         }
-//     }
-
-//     updateKeyControls(useArrowKeys) {
-//         this.useArrowKeys = useArrowKeys;
-//     }
-// }
-
-/* Initialize Disclosure Menus */
-
+"use strict";
 window.addEventListener(
     "load",
     function () {
@@ -6769,43 +4960,54 @@ window.addEventListener(
             disclosureMenus[i] = new DisclosureNav(menus[i]);
         }
 
-        // listen to arrow key checkbox
+        // Listen to arrow key checkbox
         var arrowKeySwitch = document.getElementById("arrow-behavior-switch");
+
         if (arrowKeySwitch) {
             arrowKeySwitch.addEventListener("change", function () {
                 var checked = arrowKeySwitch.checked;
+
                 for (var i = 0; i < disclosureMenus.length; i++) {
                     disclosureMenus[i].updateKeyControls(checked);
                 }
             });
         }
 
-        // fake link behavior
+        // Fake link behavior
         disclosureMenus.forEach((disclosureNav, i) => {
-            var links = menus[i].querySelectorAll('[href="#mythical-page-content"]');
-            var examplePageHeading = document.getElementById("mythical-page-heading");
+            var links = menus[i].querySelectorAll(
+                '[href="#mythical-page-content"]'
+            );
+
+            var examplePageHeading = document.getElementById(
+                "mythical-page-heading"
+            );
+
             for (var k = 0; k < links.length; k++) {
-                // The codepen export script updates the internal link href with a full URL
-                // we're just manually fixing that behavior here
+                // The CodePen export script updates the internal link href with a full URL
+                // We're manually fixing that behavior here
                 links[k].href = "#mythical-page-content";
 
                 links[k].addEventListener("click", (event) => {
-                    // change the heading text to fake a page change
+                    // Change the heading text to fake a page change
                     var pageTitle = event.target.innerText;
                     examplePageHeading.innerText = pageTitle;
 
-                    // handle aria-current
+                    // Handle aria-current
                     for (var n = 0; n < links.length; n++) {
                         links[n].removeAttribute("aria-current");
                     }
+
                     event.target.setAttribute("aria-current", "page");
                 });
             }
         });
     },
-    false);
+    false
+);
 
 function replaceMenuKey(p_innerText, p_innerHTML, p_shortcut_key) {
+    logDebug("function : replaceMenuKey", "S");
     var MenuText = p_innerText.trim();
     var accKey = MenuText;
     var letterInd = accKey.toUpperCase().indexOf(p_shortcut_key.toUpperCase());
@@ -6816,18 +5018,20 @@ function replaceMenuKey(p_innerText, p_innerHTML, p_shortcut_key) {
     }
     var MenuHtml = p_innerHTML;
     MenuHtml = MenuHtml.replace(MenuText, accKey);
+    logDebug("function : replaceMenuKey", "E");
     return MenuHtml;
 }
 
-
-
 function swapSpecialFixel(pMainMod, pSwapMod, pShelf) {
+    logDebug("function : swapSpecialFixel", "S");
     var pattern = new RegExp("[" + pMainMod + "]/");
     var new_shelf_id = pShelf.Shelf.replace(pattern, pSwapMod);
     pShelf.Shelf = new_shelf_id;
+    logDebug("function : swapSpecialFixel", "E");
 }
 
 function validate_shelf_inside_pegboard(p_moduleindex, p_shelfindex, p_pog_index, p_shelf_x, p_shelf_y, p_DivShelf) {
+    logDebug("function : validate_shelf_inside_pegboard", "S");
     var itemdtl = g_pog_json[p_pog_index].ModuleInfo[p_moduleindex].ShelfInfo[p_shelfindex].ItemInfo;
     var shelfdtl = g_pog_json[p_pog_index].ModuleInfo[p_moduleindex].ShelfInfo[p_shelfindex];
     var validate = "Y";
@@ -6980,11 +5184,12 @@ function validate_shelf_inside_pegboard(p_moduleindex, p_shelfindex, p_pog_index
         }
     }
     //ASA-1544 - End
-
+    logDebug("function : validate_shelf_inside_pegboard", "E");
     return validate;
 }
 
 function makeResizableRow() {
+    logDebug("function : makeResizableRow", "S");
     const t_bodyNavW = $("#t_Body_nav").width();
     const t_topBarH = $("#top_bar").height();
     const t_apexHeader = $("#t_Header").height();
@@ -7196,62 +5401,13 @@ function makeResizableRow() {
         g_scene_objects[p_pog_index].scene.children[0] = currCamera;
         set_camera_z(currCamera, parseFloat(curr_details_arr[2]), parseFloat(curr_details_arr[3]), parseFloat(curr_details_arr[0]), parseFloat(curr_details_arr[1]), g_offset_z, parseFloat(curr_details_arr[4]), parseFloat(curr_details_arr[5]), true, p_pog_index);
     }
+    logDebug("function : makeResizableRow", "E");
 }
-
-function openItemSubLabel(p_subLabelType) {
-    try {
-        var subLabelInd = "N";
-        if (g_pog_json.length > 0) {
-            var p = -1;
-            if (g_all_pog_flag == "Y") {
-                p = 0;
-            } else {
-                p = g_pog_index;
-            }
-            if (p_subLabelType !== "") {
-                subLabelInd = "Y";
-            }
-            var originalCanvas = g_pog_index;
-            g_delete_details['is_dragging'] = 'Y';      //ASA-1577
-            $("#item_sublbl_sub .items").removeClass("item_sublabel_active");
-            if (p_subLabelType == "") {
-                $(".item_sublabel").removeClass("item_sublabel_active");
-                $("#item_sublbl_sub .items").removeClass("item_sublabel_active");
-            } else {
-                $(".item_sublabel").addClass("item_sublabel_active");
-                $("#item_sublbl_sub ." + p_subLabelType).addClass("item_sublabel_active");
-            }
-            for (const pogInfo of g_pog_json) {
-                if ((p !== g_ComViewIndex && g_ComViewIndex > -1) || g_ComViewIndex == -1) {
-                    g_renderer = g_scene_objects[p].renderer;
-                    g_scene = g_scene_objects[p].scene;
-                    g_camera = g_scene_objects[p].scene.children[0];
-                    showItemSubLabel(p_subLabelType, subLabelInd, $v("P193_POGCR_ITEM_NUM_LBL_COLOR"), $v("P193_POGCR_ITEM_NUM_LABEL_POS"), p);
-                    set_indicator_objects(p);
-                }
-                if (g_all_pog_flag == "N") {
-                    break;
-                } else {
-                    p++;
-                }
-            }
-            if (g_scene_objects.length > 0) {
-                g_renderer = g_scene_objects[originalCanvas].renderer;
-                g_scene = g_scene_objects[originalCanvas].scene;
-                g_camera = g_scene_objects[originalCanvas].scene.children[0];
-            }
-            g_delete_details['is_dragging'] = 'N';      //ASA-1577
-        }
-    } catch (err) {
-        error_handling(err);
-    }
-}
-
-
 
 //ASA-1405
 //this function is used in crushing items in the chest. we find out if any of the items in the chest is getting hit by dragged item.
 function checkChestCrushedItemHit(p_citem_x, p_citem_y, p_citem_w, p_citem_h, p_shelf, p_item_index) {
+    logDebug("function : checkChestCrushedItemHit", "S");
     try {
         var l_cnt = 0;
         var citem_start = wpdSetFixed(p_citem_x - p_citem_w / 2),
@@ -7283,6 +5439,7 @@ function checkChestCrushedItemHit(p_citem_x, p_citem_y, p_citem_w, p_citem_h, p_
             }
             l_cnt++;
         }
+        logDebug("function : checkChestCrushedItemHit", "E");
         return "N";
     } catch (err) {
         error_handling(err);
@@ -7292,6 +5449,7 @@ function checkChestCrushedItemHit(p_citem_x, p_citem_y, p_citem_w, p_citem_h, p_
 //if the items is hit on the left side. the right side position of the will be maintained and left of the portion which is hit. will be reduced.
 //same goes to all sides of the item.
 function getChestOverlappedItemDimension(p_item_x, p_item_y, p_item_w, p_item_h, p_overlapped_item) {
+    logDebug("function : getChestOverlappedItemDimension", "S");
     try {
         const item_start = wpdSetFixed(p_item_x - p_item_w / 2),
             item_end = wpdSetFixed(p_item_x + p_item_w / 2),
@@ -7427,12 +5585,14 @@ function getChestOverlappedItemDimension(p_item_x, p_item_y, p_item_w, p_item_h,
     } catch (err) {
         error_handling(err);
     }
+    logDebug("function : getChestOverlappedItemDimension", "E");
 }
 
 //This function is called in crushitem function. where this will decide how much of the items to be crushed and how to set the X,Y so that 
 //items position is not changed. for example crushing left side. it will maintaine the position all other sides.
 //ASA-1936.2 Regression Fix - Updated Logic for mass updated and Added check for permutations
 function crushChestItemHW(p_shelf, p_item, p_item_index, p_crush_height_perc, p_crush_width_perc, p_item_manual_wc_ind, p_item_manual_hc_ind, p_actualHeight, p_actualWidth, p_set_ind) {
+    logDebug("function : crushChestItemHW", "S");
     try {
         var l_cnt = 0;
         var item_height = p_item.RH + nvl(p_item.CapHeight),
@@ -7559,6 +5719,7 @@ function crushChestItemHW(p_shelf, p_item, p_item_index, p_crush_height_perc, p_
             }
         }
         g_error_category = "";
+        logDebug("function : crushChestItemHW", "E");
         return "Y";
     } catch (err) {
         error_handling(err);
@@ -7568,612 +5729,20 @@ function crushChestItemHW(p_shelf, p_item, p_item_index, p_crush_height_perc, p_
 // ASA-1628, this is was need to handle a case when y,x,w,h are same of 2 shelf. They were getting overlapped.
 // New validation added in validate_shelf_min_distance
 function isShelfOverlapShelf(pShelfX, pShelfY, pShelfW, pShelfH, pCompareX, pCompareY, pCompareW, pCompareH) {
+    logDebug("function : isShelfOverlapShelf", "S");
     try {
         const overlapX = Math.abs(wpdSetFixed(pShelfX - pCompareX)) < wpdSetFixed((pShelfW / 2 + pCompareW / 2));
         const overlapY = Math.abs(wpdSetFixed(pShelfY - pCompareY)) < wpdSetFixed((pShelfH / 2 + pCompareH / 2));
-
+        logDebug("function : isShelfOverlapShelf", "E");
         return overlapX && overlapY;
     } catch (err) {
         error_handling(err);
     }
 }
 
-
-//ASA-1697 - Start
-function getAutofillModShelf(p_dragMouseStart, p_dragMouseEnd, p_pog_json, p_pog_index, p_action_ind) {
-    try {
-        var dragStart = wpdSetFixed(Math.min(p_dragMouseStart.x, p_dragMouseEnd.x));
-        var dragEnd = wpdSetFixed(Math.max(p_dragMouseStart.x, p_dragMouseEnd.x));
-        var dragTop = wpdSetFixed(Math.max(p_dragMouseStart.y, p_dragMouseEnd.y));
-        var dragBottom = wpdSetFixed(Math.min(p_dragMouseStart.y, p_dragMouseEnd.y));
-
-        var selectedModule = [];
-        var overlappingShelfs = [];
-        var maxOverlapWidth = 0;
-        var idx = 0;
-        for (const module of p_pog_json[p_pog_index].ModuleInfo) {
-            if (module.ParentModule == null) {
-                const modStart = wpdSetFixed(module.X - module.W / 2);
-                const modEnd = wpdSetFixed(module.X + module.W / 2);
-                const modTop = wpdSetFixed(module.Y + module.H / 2);
-                const modBottom = wpdSetFixed(module.Y - module.H / 2);
-
-                const adjustedDragStart = Math.max(dragStart, modStart);
-                const adjustedDragEnd = Math.min(dragEnd, modEnd);
-                const adjustedDragTop = Math.min(dragTop, modTop);
-                const adjustedDragBottom = Math.max(dragBottom, modBottom);
-
-                if (adjustedDragStart < adjustedDragEnd && adjustedDragBottom < adjustedDragTop) {
-                    const overlapWidth = adjustedDragEnd - adjustedDragStart;
-
-                    if (overlapWidth > maxOverlapWidth) {
-                        maxOverlapWidth = overlapWidth;
-                        selectedModule[0] = {
-                            moduleInfo: module,
-                            dragStart: adjustedDragStart, dragEnd: adjustedDragEnd, dragTop: adjustedDragTop, dragBottom: adjustedDragBottom,
-                            modStart: modStart, modEnd: modEnd, modTop: modTop, modBottom: modBottom,
-                            modIdx: idx
-                        };
-                    }
-                }
-            }
-            idx++;
-        }
-        idx = 0;
-        if (selectedModule.length > 0) {
-            for (const blkInfo of g_mod_block_list) {
-                //ASA-1986 start
-                if (
-                    typeof blkInfo === "undefined" || blkInfo == null || typeof blkInfo.BlkModInfo === "undefined" || blkInfo.BlkModInfo == null || blkInfo.BlkModInfo.length == 0 || typeof blkInfo.BlkModInfo[0] === "undefined" || blkInfo.BlkModInfo[0] == null || typeof blkInfo.BlockDim === "undefined" || blkInfo.BlockDim == null || typeof blkInfo.BlockDim.FinalTop === "undefined" || typeof blkInfo.BlockDim.FinalBtm === "undefined"
-                ) {
-                    continue;
-                } //ASA-1986  end 
-                const prevBlk = blkInfo.BlkModInfo[0];
-                if (typeof prevBlk.dragStart === "undefined" || typeof prevBlk.dragEnd === "undefined") { //ASA-1986 start
-                    continue;
-                }
-                // if (prevBlk.dragStart < selectedModule[0].dragEnd && prevBlk.dragEnd > selectedModule[0].dragStart && prevBlk.dragTop > selectedModule[0].dragBottom && prevBlk.dragBottom < selectedModule[0].dragTop) {
-                if (prevBlk.dragStart < selectedModule[0].dragEnd && prevBlk.dragEnd > selectedModule[0].dragStart && blkInfo.BlockDim.FinalTop > selectedModule[0].dragBottom && blkInfo.BlockDim.FinalBtm < selectedModule[0].dragTop) {  //ASA-1878
-
-                    // if(selectedModule[0].dragTop <= blkInfo.BlockDim.FinalBtm && selectedModule[0].dragBottom >= blkInfo.BlockDim.FinalBtm){
-                    //     selectedModule[0].dragTop = blkInfo.BlockDim.FinalBtm;
-                    // } 
-
-                    // if(selectedModule[0].dragBottom <= blkInfo.BlockDim.FinalTop && selectedModule[0].dragTop >= blkInfo.BlockDim.FinalTop){
-                    //     selectedModule[0].dragBottom = blkInfo.BlockDim.FinalTop;
-                    // }
-
-                    if (prevBlk.dragEnd > selectedModule[0].dragStart && prevBlk.dragEnd < selectedModule[0].dragEnd) {
-                        selectedModule[0].dragStart = prevBlk.dragEnd;
-                    }
-                    if (prevBlk.dragStart < selectedModule[0].dragEnd && selectedModule[0].dragStart < prevBlk.dragStart) {
-                        selectedModule[0].dragEnd = prevBlk.dragStart;
-                    }
-
-                    if (selectedModule[0].dragStart >= prevBlk.dragStart && selectedModule[0].dragEnd <= prevBlk.dragEnd
-                        // && selectedModule[0].dragTop <= blkInfo.BlockDim.FinalTop && selectedModule[0].dragBottom >= blkInfo.BlockDim.FinalBtm
-                    ) {
-                        selectedModule = [];
-                        overlappingShelfs = [];
-                        return [selectedModule, overlappingShelfs];
-                    }
-                    g_DragMouseStart.x = selectedModule[0].dragStart;
-                    // g_DragMouseStart.y = selectedModule[0].dragTop;
-                    g_DragMouseEnd.x = selectedModule[0].dragEnd;
-                    // g_DragMouseEnd.y = selectedModule[0].dragBottom; 
-                }
-            }
-
-
-            for (const shelf of selectedModule[0].moduleInfo.ShelfInfo) {
-                if (shelf.ObjType != 'TEXTBOX' && shelf.ObjType != 'DIVIDER' && shelf.ObjType != 'BASE' && shelf.ObjType != 'DIVIDER') {
-                    const shelfStart = wpdSetFixed(shelf.X - shelf.W / 2);
-                    const shelfEnd = wpdSetFixed(shelf.X + shelf.W / 2);
-                    const shelfTop = wpdSetFixed(shelf.Y + shelf.H / 2);
-                    const shelfBottom = wpdSetFixed(shelf.Y - shelf.H / 2);
-                    if (dragStart < shelfEnd && dragEnd > shelfStart && dragTop > shelfBottom && dragBottom < shelfTop) {
-                        const overlapWidth = Math.min(dragEnd, shelfEnd) - Math.max(dragStart, shelfStart);
-                        overlappingShelfs.push({ ShelfInfo: shelf, OverlapWidth: overlapWidth, ShelfIdx: idx });
-                    }
-                }
-                idx++;
-            }
-        } else {
-            selectedModule = [];
-            overlappingShelfs = [];
-        }
-        return [selectedModule, overlappingShelfs];
-    } catch (err) {
-        error_handling(err);
-    }
-}
-
-async function setAutofillBlock(p_action_ind, p_old_blk_name, p_escape_ind = "N", p_new_ind = 'Y', p_color = '#ffffff') {
-    try {
-        var block_detail = {};
-        var filters_arr = [];
-        var attr_arr = [];
-        var filter_val = [];
-        var blk_name_arr = [];
-        var upd_block_dtl = {};
-        var blockName = p_old_blk_name; //$v("P193_BLK_NAME") + "_AFP";
-        if (p_escape_ind == "Y") {
-            var block_details_arr = [];
-            for (const obj of g_mod_block_list) {
-                var details = {};
-                details["BlkColor"] = obj.BlkColor;
-                details["BlkName"] = obj.BlkName;
-                details["BlkRule"] = obj.BlkRule;
-                details["BlkFilters"] = obj.BlockFilters.join(" AND ");
-                details["OldBlkName"] = obj.BlkName;
-                obj["BlkFilters"] = details["BlkFilters"];  //ASA-1694;
-                block_details_arr.push(details);
-            }
-            closeInlineDialog("block_details");
-            var retval = await save_blk_dtl_coll(p_action_ind, p_old_blk_name, block_details_arr);
-        }
-        if (p_old_blk_name == blockName && p_action_ind == "U") {
-            blk_name_arr = [];
-        } else {
-            blk_name_arr = [blockName];
-        }
-
-        block_detail["BlkName"] = blockName;
-        if (p_new_ind == 'N') { //garit
-            block_detail["BlkColor"] = p_color;
-        } else {
-            block_detail["BlkColor"] = $v("P193_BLK_COLOR");
-        }
-        block_detail["BlkRule"] = $v("P193_BLK_RULE");
-        var shelf_arr = [];
-        var mod_index = [];
-        var final_shelf_arr = [];
-        if (p_action_ind !== "U" && (!Array.isArray(g_autofillModInfo) || g_autofillModInfo.length == 0 || !Array.isArray(g_autofillShelfInfo) || g_autofillShelfInfo.length == 0)) { //ASA-1986 start
-            return false;
-        }
-        if (p_action_ind !== "U") {
-            block_detail["DragMouseStart"] = g_DragMouseStart;
-            block_detail["DragMouseEnd"] = g_DragMouseEnd;
-            block_detail["BlkModInfo"] = g_autofillModInfo;
-            block_detail["BlkShelfInfo"] = g_autofillShelfInfo;
-            for (const shelf of g_autofillShelfInfo) {
-                shelf.ShelfInfo.BlkName = blockName;
-                shelf.ShelfInfo.MIndex = g_autofillModInfo[0].modIdx;
-                shelf.ShelfInfo.SIndex = shelf.ShelfIdx;
-                shelf_arr.push(shelf.ShelfInfo);
-            }
-            mod_index.push(g_autofillModInfo[0].modIdx);
-            mod_index.sort();
-            // if (g_mod_block_list.length > 0) {
-            //     for (const shelfs of shelf_arr) {
-            //         valid = true;
-            //         for (const obj of g_mod_block_list) {
-            //             if (!valid) {
-            //                 break;
-            //             }
-            //             for (const dtl of obj.g_delete_details) {
-            //                 if (shelfs.MIndex == dtl.MIndex && shelfs.SIndex == dtl.SIndex) {
-            //                     valid = false;
-            //                     break;
-            //                 }
-            //             }
-            //         }
-            //         if (valid) {
-            //             final_shelf_arr.push(shelfs);
-            //         }
-            //     }
-            // } else {
-            final_shelf_arr = shelf_arr;
-            // }
-        } else {
-            for (const obj of g_mod_block_list) {
-                if (obj.BlkName == p_old_blk_name) {
-                    final_shelf_arr = obj.g_delete_details;
-                    mod_index = obj.mod_index;
-                    block_detail["DragMouseStart"] = obj.DragMouseStart;
-                    block_detail["DragMouseEnd"] = obj.DragMouseEnd;
-                    break;
-                }
-            }
-            for (const obj of final_shelf_arr) {
-                obj.BlkName = block_detail["BlkName"];
-            }
-            g_DragMouseStart = block_detail["DragMouseStart"];
-            g_DragMouseEnd = block_detail["DragMouseEnd"];
-        }
-        block_detail["g_delete_details"] = final_shelf_arr;
-        if (p_new_ind != 'N') //garit
-        {
-            var model = apex.region("block_filters").widget().interactiveGrid("getViews", "grid").model;
-
-            model.forEach(function (record) {
-                var filters = typeof model.getValue(record, "FILTER") == "object" ? model.getValue(record, "FILTER").v : model.getValue(record, "FILTER");
-                var value = model.getValue(record, "VALUE");
-                filter_val.push(filters + "#" + value);
-                if (filters !== "") {
-                    var filter_list = filters.split("-");
-                    attr_arr.push(filter_list[0]);
-                    filters_arr.push(filter_list[0] + " = " + (filter_list[1] == "C" ? '"' : "") + value + (filter_list[1] == "C" ? '"' : ""));
-                }
-            });
-        }
-        for (const obj of g_mod_block_list) {
-            blk_name_arr.push(obj.BlkName);
-        }
-
-        var blk_dup = findDuplicates(blk_name_arr);
-        var dup_arr = findDuplicates(attr_arr);
-
-        if (blk_dup.length > 0) {
-            alert(get_message("POGCR_BLK_DUP"));
-        } else if (dup_arr.length > 0) {
-            alert(get_message("POGCR_DUP_REC_FOUND"));
-        } else if (attr_arr.includes("SUBCLASS") && (!attr_arr.includes("CLASS") || !attr_arr.includes("DEPT"))) {
-            alert(get_message("POGCR_DEPT_CLASS_MANDATE"));
-        } else if (attr_arr.includes("CLASS") && !attr_arr.includes("DEPT")) {
-            alert(get_message("POGCR_DEPT_MANDATE"));
-        } else {
-            block_detail["BlockFilters"] = filters_arr;
-            block_detail["FilterVal"] = filter_val;
-            block_detail["mod_index"] = mod_index;
-            if (p_action_ind == "U") {
-                for (const obj of g_mod_block_list) {
-                    if (obj.BlkName == p_old_blk_name) {
-                        for (const child of obj.BlockDim.ColorObj.children) {
-                            if (child.uuid == p_old_blk_name) {
-                                obj.BlockDim.ColorObj.remove(child);
-                                break;
-                            }
-                        }
-                    }
-                }
-                var i = 0;
-                for (const obj of g_mod_block_list) {
-                    if (obj.BlkName == p_old_blk_name) {
-                        upd_block_dtl = JSON.parse(JSON.stringify(obj));
-                        g_mod_block_list.splice(i, 1);
-                    }
-                    i++;
-                }
-            }
-            if (p_new_ind != 'N') //garit
-            {
-                apex.region("block_filters").widget().interactiveGrid("getActions").set("edit", false);
-                apex.region("block_filters").widget().interactiveGrid("getViews", "grid").model.clearChanges();
-                apex.region("block_filters").refresh();
-                clear_blinking();
-            }
-            var sendColor =
-                (p_new_ind == 'N')
-                    ? p_color
-                    : $v("P193_BLK_COLOR");
-            var ret_dtl = await colorAutofillBlock(g_DragMouseStart, g_DragMouseEnd, mod_index, sendColor, blockName, p_action_ind, upd_block_dtl, g_pog_index);
-            if (typeof ret_dtl === "undefined" || ret_dtl == null) {
-                return false; // ASA-1986 start
-            }
-            block_detail["BlockDim"] = ret_dtl;
-            g_mod_block_list.push(block_detail);
-
-            closeInlineDialog("block_details");
-
-            if (p_action_ind == "U") {
-                var details = {};
-                var block_details_arr = [];
-                for (const obj of g_mod_block_list) {
-                    if (obj.BlkName !== blockName && obj.BlkName !== p_old_blk_name) {
-                        var details = {};
-                        details["BlkColor"] = obj.BlkColor;
-                        details["BlkName"] = obj.BlkName;
-                        details["BlkRule"] = obj.BlkRule;
-                        details["BlkFilters"] = obj.BlockFilters.join(" AND ");
-                        details["OldBlkName"] = obj.BlkName;
-                        obj["BlkFilters"] = details["BlkFilters"];
-                        block_details_arr.push(details);
-                    } else if (obj.BlkName == p_old_blk_name || obj.BlkName == blockName) {
-                        var details = {};
-                        details["BlkColor"] = $v("P193_BLK_COLOR");
-                        details["BlkName"] = blockName;
-                        details["BlkRule"] = $v("P193_BLK_RULE");
-                        details["BlkFilters"] = filters_arr.join(" AND ");
-                        details["OldBlkName"] = p_old_blk_name;
-                        obj["BlkFilters"] = details["BlkFilters"];
-                        block_details_arr.push(details);
-                    }
-                }
-                var retval = await save_blk_dtl_coll(p_action_ind, p_old_blk_name, block_details_arr);
-            } else if (p_action_ind == "Y") {
-                var block_details_arr = [];
-
-                for (const obj of g_mod_block_list) {
-                    var details = {};
-                    details["BlkColor"] = obj.BlkColor;
-                    details["BlkName"] = obj.BlkName;
-                    details["BlkRule"] = obj.BlkRule;
-                    details["BlkFilters"] = obj.BlockFilters.join(" AND ");
-                    obj["BlkFilters"] = details["BlkFilters"];  //ASA-1694;
-                    // obj["BlkModInfo"] = g_autofillModInfo;
-                    // obj["BlkShelfInfo"] =  g_autofillShelfInfo;
-                    block_details_arr.push(details);
-                }
-                var retval = await save_blk_dtl_coll(p_action_ind, p_old_blk_name, block_details_arr);
-            } else if (p_action_ind == "A" && p_new_ind != 'N') { //ASA-1965 Issue 4 
-                var block_details_arr = [];
-
-                for (const obj of g_mod_block_list) {
-                    var details = {};
-                    details["BlkColor"] = obj.BlkColor;
-                    details["BlkName"] = obj.BlkName;
-                    details["BlkRule"] = obj.BlkRule;
-                    details["BlkFilters"] = obj.BlockFilters.join(" AND ");
-                    obj["BlkFilters"] = details["BlkFilters"];
-                    block_details_arr.push(details);
-                }
-                var retval = await save_blk_dtl_coll(p_action_ind, p_old_blk_name, block_details_arr);
-                return true //ASA-1986 start
-            }
-        }
-    } catch (err) {
-        error_handling(err);
-        return false //ASA-1986 start
-    }
-}
-
-
-async function colorAutofillBlock(p_dragMouseStart, p_dragMouseEnd, p_mod_index, p_color, p_text, p_update_flag, p_block_detail, p_pog_index, p_swapBlock) {
-    try {
-        var i = 0;
-        // ASA-1986 start
-        var calc_x = 0,
-            calc_y = 0,
-            calc_width = 0,
-            calc_height = 0;
-        var font_size = parseInt($v("P193_POGCR_BLK_TXT_SIZE"));
-        if (!Array.isArray(g_autofillModInfo) || g_autofillModInfo.length == 0) {
-            return null;
-        }
-        if (!Array.isArray(p_mod_index) || p_mod_index.length == 0) {
-            return null;
-        }
-        if (
-            typeof g_pog_json[p_pog_index] === "undefined" ||
-            g_pog_json[p_pog_index] == null ||
-            typeof g_pog_json[p_pog_index].ModuleInfo === "undefined" ||
-            typeof g_pog_json[p_pog_index].ModuleInfo[p_mod_index[0]] === "undefined"
-        ) {
-            return null;
-        }
-        // ASA-1986 end
-        var font_size = parseInt($v("P193_POGCR_BLK_TXT_SIZE"));
-        var btm_y = g_autofillModInfo[0].dragBottom,
-            top_y = g_autofillModInfo[0].dragTop;
-
-        var mod_top = g_autofillModInfo[0].modTop,
-            mod_bottom = g_autofillModInfo[0].modBottom;
-
-        var l_shelf_details = g_pog_json[p_pog_index].ModuleInfo[p_mod_index[0]].ShelfInfo;
-
-        var final_btm = -1;
-        var final_top = -1;
-
-        if (p_update_flag !== "U") {
-            final_btm = get_below_shelf(l_shelf_details, p_mod_index[0], btm_y, p_pog_index);
-            final_top = get_above_shelf(l_shelf_details, p_mod_index[0], top_y, mod_top, p_pog_index);
-            // ASA-1986 start
-            var calc_height = final_top - final_btm;
-            var calc_width = g_autofillModInfo[0].dragEnd - g_autofillModInfo[0].dragStart;
-            var calc_x = g_autofillModInfo[0].dragStart + ((g_autofillModInfo[0].dragEnd - g_autofillModInfo[0].dragStart) / 2) - g_pog_json[p_pog_index].ModuleInfo[p_mod_index[0]].X;
-            // ASA-1986 End
-
-            if (g_pog_json[p_pog_index].ModuleInfo[p_mod_index[0]].Y < final_btm) {
-                var diff = final_btm - g_pog_json[p_pog_index].ModuleInfo[p_mod_index[0]].Y;
-                calc_y = diff + calc_height / 2;
-            } else {
-                var diff = g_pog_json[p_pog_index].ModuleInfo[p_mod_index[0]].Y - final_btm;
-                calc_y = 0 - diff + calc_height / 2;
-            }
-        } else {
-            calc_x = p_block_detail.BlockDim.CalcX;
-            calc_y = p_block_detail.BlockDim.CalcY;
-            calc_width = p_block_detail.BlockDim.BlkWidth;
-            calc_height = p_block_detail.BlockDim.BlkHeight;
-            final_top = p_block_detail.BlockDim.FinalTop;
-            final_btm = p_block_detail.BlockDim.FinalBtm;
-        }
-
-        if (!Number.isFinite(calc_width) || !Number.isFinite(calc_height) || calc_width <= 0 || calc_height <= 0) {  // ASA-1986 start
-            return null;
-        }
-        if (!Number.isFinite(calc_x) || !Number.isFinite(calc_y)) {  // ASA-1986 start
-            return null;
-        }
-        var colorValue = parseInt(p_color.replace("#", "0x"), 16);
-        var hex_decimal = new THREE.Color(colorValue);
-
-        if (typeof p_text !== "string") {  // ASA-1986 start
-            p_text = "BLK";
-        }
-        if (p_text.endsWith("_AFP")) {  // ASA-1986 start
-            p_text = p_text.slice(0, -4);
-        }
-        console.log("val", p_dragMouseStart, p_dragMouseEnd, p_mod_index[0], p_color, p_text);
-        console.log("calc_height", calc_width, calc_height, calc_y, final_top, mod_top, final_btm, mod_bottom);
-
-        let mesh = dcText(p_text, font_size, 0x000000, colorValue, calc_width, calc_height, "N", "N", "Arial", "", font_size, 0, -1, 4);
-        if (!mesh) { // ASA-1986 start
-            return null;
-        }
-        var mod_object = g_world.getObjectById(g_pog_json[p_pog_index].ModuleInfo[p_mod_index[0]].MObjID);
-        if (!mod_object || typeof mod_object.add !== "function") { // ASA-1986 start
-            return null;
-        }
-        mod_object.add(mesh);
-        mesh.uuid = p_text + "_AFP";
-        if (mesh.material) {  // ASA-1986 start
-            mesh.material.opacity = 0.5;
-        }
-        if (mesh.position) { // ASA-1986 start
-            mesh.position.x = calc_x;
-            mesh.position.y = calc_y;
-            mesh.position.z = 0.009;
-        }
-        render(p_pog_index);
-        g_delete_details = [];
-        g_mselect_drag = "N";
-        var details = {};
-        details["CalcX"] = calc_x;
-        details["CalcY"] = calc_y;
-        details["CalcZ"] = 0.009;
-        details["BlkWidth"] = calc_width;
-        details["BlkHeight"] = calc_height;
-        details["ColorObj"] = mod_object;
-        details["FinalTop"] = final_top;
-        details["FinalBtm"] = final_btm;
-
-        if (p_swapBlock == "Y") {
-            g_DragMouseStart.x = p_dragMouseStart.x;
-            g_DragMouseStart.y = p_dragMouseStart.y;
-            g_DragMouseEnd.x = p_dragMouseEnd.x;
-            g_DragMouseEnd.y = p_dragMouseEnd.y;
-            await get_multiselect_obj(p_pog_index);
-            p_block_detail.g_delete_details = [];
-            for (shelfs of g_delete_details) {
-                p_block_detail.g_delete_details.push(shelfs);
-            }
-            g_delete_details = [];
-        }
-        return details;
-    } catch (err) {
-        // error_handling(err);
-        console.warn("colorAutofillBlock skipped due to invalid render state:", err); // ASA-1986 start
-        return null;
-    }
-
-}
-
-var g_current_highlighted_block = null;
-
-function _getRenderableMesh(obj) {
-    if (!obj) return null;
-    if (obj.type === 'Mesh') return obj;
-    if (obj.type === 'Group' || obj.type === 'Object3D') {
-        // find first mesh child
-        const mesh = obj.getObjectByProperty && obj.getObjectByProperty('type', 'Mesh');
-        if (mesh) return mesh;
-        // fallback: traverse children
-        let found = null;
-        obj.traverse((c) => {
-            if (!found && c.type === 'Mesh') found = c;
-        });
-        return found;
-    }
-    return null;
-}
-
-function clearAutofillBlockHighlight() {
-    try {
-        if (!g_current_highlighted_block || !Array.isArray(g_mod_block_list)) return;
-        for (const cObj of g_mod_block_list) {
-            if (cObj.BlkName === g_current_highlighted_block && cObj.BlockDim && cObj.BlockDim.ColorObj) {
-                var meshRoot = cObj.BlockDim.ColorObj.getObjectByProperty('uuid', g_current_highlighted_block);
-                var mesh = _getRenderableMesh(meshRoot);
-                if (mesh && mesh.userData && mesh.userData._outline) {
-                    try {
-                        // remove blink interval
-                        if (mesh.userData._outlineInterval) {
-                            clearInterval(mesh.userData._outlineInterval);
-                            mesh.userData._outlineInterval = null;
-                        }
-                        // remove outline object
-                        if (mesh.userData._outline && mesh.userData._outline.parent) {
-                            mesh.userData._outline.parent.remove(mesh.userData._outline);
-                        }
-                        mesh.userData._outline = null;
-                    } catch (e) {
-                        console.warn(e);
-                    }
-                }
-                break;
-            }
-        }
-    } catch (err) {
-        console.warn(err);
-    } finally {
-        g_current_highlighted_block = null;
-        try { render(); } catch (e) {}
-    }
-}
-
-function highlightAutofillBlock(p_uuid, p_pog_index) {
-    try {
-        if (!p_uuid || !Array.isArray(g_mod_block_list)) return;
-        // if another block is highlighted, clear it first
-        if (g_current_highlighted_block && g_current_highlighted_block !== p_uuid) {
-            clearAutofillBlockHighlight();
-        }
-
-        for (const cObj of g_mod_block_list) {
-            if (cObj.BlkName === p_uuid && cObj.BlockDim && cObj.BlockDim.ColorObj) {
-                var meshRoot = cObj.BlockDim.ColorObj.getObjectByProperty('uuid', p_uuid);
-                var mesh = _getRenderableMesh(meshRoot);
-                if (!mesh) return;
-
-                // if outline already exists, ensure it's visible and return
-                if (mesh.userData && mesh.userData._outline) {
-                    mesh.userData._outline.visible = true;
-                    g_current_highlighted_block = p_uuid;
-                    render(p_pog_index);
-                    return;
-                }
-
-                // create edges outline
-                try {
-                    var geom = null;
-                    if (mesh.geometry) geom = mesh.geometry;
-                    else {
-                        // try to build from children geometry
-                        geom = new THREE.Geometry();
-                    }
-                    var edges = new THREE.EdgesGeometry(geom);
-                    var mat = new THREE.LineBasicMaterial({ color: 0xffff00, linewidth: 2 });
-                    var outline = new THREE.LineSegments(edges, mat);
-
-                    // make sure outline follows mesh transform
-                    outline.position.set(0, 0, 0);
-                    outline.rotation.set(0, 0, 0);
-                    outline.scale.set(1, 1, 1);
-
-                    // add outline as child so it inherits transforms
-                    mesh.add(outline);
-
-                    if (!mesh.userData) mesh.userData = {};
-                    mesh.userData._outline = outline;
-
-                    // blinking: toggle visibility
-                    mesh.userData._outlineInterval = setInterval(function () {
-                        try {
-                            if (mesh.userData && mesh.userData._outline) {
-                                mesh.userData._outline.visible = !mesh.userData._outline.visible;
-                                try { render(p_pog_index); } catch (e) {}
-                            }
-                        } catch (e) {}
-                    }, 500);
-
-                    g_current_highlighted_block = p_uuid;
-                    render(p_pog_index);
-                } catch (e) {
-                    console.warn(e);
-                }
-                break;
-            }
-        }
-    } catch (err) {
-        console.warn(err);
-    }
-}
-//ASA-1697 - End
-
 //ASA-1765 Issue 3
 function validateShelfWithFixedItem(pShelf, pSpreadProduct, pSpreadGap, pItems) {
+    logDebug("function : validateShelfWithFixedItem", "S");
     try {
         var shelfStart = wpdSetFixed(pShelf.X - pShelf.W / 2);
         var shelfEnd = wpdSetFixed(pShelf.X + pShelf.W / 2);
@@ -8232,6 +5801,7 @@ function validateShelfWithFixedItem(pShelf, pSpreadProduct, pSpreadGap, pItems) 
                 return true;
             }
         }
+        logDebug("function : validateShelfWithFixedItem", "E");
         return false;
     } catch (err) {
         error_handling(err);
@@ -8239,6 +5809,7 @@ function validateShelfWithFixedItem(pShelf, pSpreadProduct, pSpreadGap, pItems) 
 }
 
 function open_draft() {
+    logDebug("function : open_draft", "S");
     g_color_arr = [];
     g_highlightArr = [];
     if (typeof g_pog_json !== "undefined" && g_pog_json.length > 0 && g_pog_edited_ind == "Y") {
@@ -8249,10 +5820,7 @@ function open_draft() {
         openCustomDialog("OPEN_DRAFT", $v("P193_OPEN_DRAFT_URL"), "P193_DRAFT_TRIGGER_ELEMENT");
     }
     g_dblclick_opened = "Y";
-
-
-
-    //logDebug("function : open_draft", "E");
+    logDebug("function : open_draft", "E");
 }
 
 function openCustomDialog(p_ind, p_url, p_item) {
@@ -8299,6 +5867,7 @@ function open_pog() {
 }
 
 async function open_draft_pog(p_imageLoadInd = "N", p_draft_pog_list, p_open_attribute) {
+    logDebug("function : open_draft_pog", "S");
     if (p_draft_pog_list !== null) {
         var records = JSON.parse(p_draft_pog_list);
         var open_attr = p_open_attribute;
@@ -8343,7 +5912,7 @@ async function open_draft_pog(p_imageLoadInd = "N", p_draft_pog_list, p_open_att
         p.done(function (data) {
             var return_data = $.trim(data);
             if (return_data.match(/ERROR.*/)) {
-                javascript: window.open("f?p=" + $v("pFlowId") + ":25:" + $v("pInstance") + ":APEX_CLONE_SESSION:NO::P193_OPEN_NEW_TAB,P193_PRODUCT_BTN_CLICK,P193_DRAFT_LIST,P193_POG_DESCRIPTION,P193_EXISTING_DRAFT_VER:Y,N," + p_draft_seq_id + "," + p_draft_desc + "," + p_draft_version);
+                javascript: window.open("f?p=" + $v("pFlowId") + ":193:" + $v("pInstance") + ":APEX_CLONE_SESSION:NO::P193_OPEN_NEW_TAB,P193_PRODUCT_BTN_CLICK,P193_DRAFT_LIST,P193_POG_DESCRIPTION,P193_EXISTING_DRAFT_VER:Y,N," + p_draft_seq_id + "," + p_draft_desc + "," + p_draft_version);
                 sessionStorage.removeItem("POGJSON");
                 resolve("SUCESS");
             } else if (return_data !== "") {
@@ -8356,16 +5925,18 @@ async function open_draft_pog(p_imageLoadInd = "N", p_draft_pog_list, p_open_att
         g_auto_fill_active = "N";
         await auto_fill_setup(0);
         if (!g_mod_block_list || g_mod_block_list.length === 0) { //Garit
-            await createDynamicBlocks($v('P193_OPEN_POG_CODE'), $v('P193_OPEN_DRAFT'), $v('P193_OPEN_POG_VERSION'),$v('P193_EXISTING_DRAFT_VER'));
+            await createDynamicBlocks($v('P193_OPEN_POG_CODE'), $v('P193_OPEN_DRAFT'), $v('P193_OPEN_POG_VERSION'), $v('P193_EXISTING_DRAFT_VER'));
         } else {
             apex.region("mod_block_details").refresh();
             $("#added_attribute").show();
             apex.region("added_attribute").refresh();
         }
         await runattrCollections();
-        add_pog_versions();
-        wpdCaptureShowChangesBlockSnapshot(g_mod_block_list, "Y");  //ASA-1986 
+        await add_pog_versions();
+        capture_changes_blk_snapshot(g_mod_block_list, "Y");  //ASA-1986 
+        g_reset_block_snapshot = JSON.parse(JSON.stringify(g_mod_block_list));
     }
+    logDebug("function : open_draft_pog", "E");
 }
 
 async function get_json_data(p_pog_code, p_imageLoadInd = "N", p_pog_desc) {
@@ -8703,6 +6274,8 @@ async function get_existing_pog(pog_code, pog_version, canvasNo, pMultiple, pIma
 async function open_existing_pog(p_pog_list_arr, p_openAttr, p_imageLoadInd = "N") {
     try {
         logDebug("function : open_existing ; ", "S");
+        g_reset_pog_list_arr = JSON.parse(JSON.stringify(p_pog_list_arr));
+        g_reset_open_attr = p_openAttr;
         addLoadingIndicator(); //ASA-1500
         $("#canvas-list-holder").html("");
         g_open_pog_flag = "Y";
@@ -8763,8 +6336,6 @@ async function open_existing_pog(p_pog_list_arr, p_openAttr, p_imageLoadInd = "N
             await setDefaultState("N");
             $("#pog_list_btn").css("display", "none"); //ASA-1425
             $("#chng_view_btn").css("display", "none"); //ASA-1425
-            $(".add_pog").css("display", "block");
-            $(".open_par").css("display", "block"); //ASA-1587
             if (real_pog_list[0] == "N") {
                 removeLoadingIndicator(regionloadWait); //ASA-1500
                 confirm(get_message("VIRTUAL_POG_OPEN_ALERT"), get_global_ind_values("AI_CONFIRM_OK_TEXT"), get_global_ind_values("AI_CONFIRM_CANCEL_TEXT"), function () {
@@ -8781,17 +6352,7 @@ async function open_existing_pog(p_pog_list_arr, p_openAttr, p_imageLoadInd = "N
                         g_seqArrDtl["pogType"] = "E";
                         g_seqArr.push(g_seqArrDtl);
                         addLoadingIndicator(); //ASA-1500
-                        await get_existing_pog(pog_code_list[0], pog_version_list[0], 0, "N", "N");
-                        // //ASA-1803 Added for refresh sales.
-                        // if ($v("P193_AUTO_REFRESH_SALES_FOR_POG") == "Y" && g_pog_json[0].NewPOG != "Y") {
-                        //     //ASA-1803 Issue 3, 9
-                        //     await refresh_sales_data(13, "", $v("P193_POGCR_FONTSIZE_DAYSOFSUPP"), g_hide_show_dos_label, g_show_days_of_supply, "N", "N", "N", pog_code_list[0], "N", pog_code_list[0], "N", g_pog_index, "Y");
-                        //     $s("P193_REFRESH_SALE_CALL", "Y");
-                        // }
-                        // if ($v("P193_POGCR_ITEM_DIM_AUTO_REFRESH") == "Y") {
-                        //     //ASA-1812 Refresh Item Dimension. Issue 3
-                        //     await itemDimUpdate(g_pog_index);
-                        // }
+                        await get_existing_pog(pog_code_list[0], pog_version_list[0], 0, "N", "N");                       
                         removeLoadingIndicator(regionloadWait); //ASA-1500
                         render(0);
                         animate_all_pog();
@@ -8812,14 +6373,7 @@ async function open_existing_pog(p_pog_list_arr, p_openAttr, p_imageLoadInd = "N
                     g_seqArrDtl["pogVersion"] = pog_version_list[0];
                     g_seqArrDtl["pogType"] = "E";
                     g_seqArr.push(g_seqArrDtl);
-                    var retval = await get_existing_pog(pog_code_list[0], pog_version_list[0], 0, "N", "N");
-                    //ASA-1803 Added for refresh sales.
-                    // await refresh_sales_data(13, "", $v("P193_POGCR_FONTSIZE_DAYSOFSUPP"), g_hide_show_dos_label, g_show_days_of_supply, "N", "N", "N", pog_code_list[0], pog_code_list[0], "N", g_pog_index, "Y");
-
-                    // if ($v("P193_POGCR_ITEM_DIM_AUTO_REFRESH") == "Y") {
-                    //     //ASA-1812 Refresh Item Dimension. Issue 3
-                    //     await itemDimUpdate(g_pog_index);
-                    // }
+                    var retval = await get_existing_pog(pog_code_list[0], pog_version_list[0], 0, "N", "N");                    
                     removeLoadingIndicator(regionloadWait); //ASA-1500    
                     g_auto_fill_active = "N";
                     $s("P193_OPEN_DRAFT", 'N'); //Garit
@@ -8836,15 +6390,17 @@ async function open_existing_pog(p_pog_list_arr, p_openAttr, p_imageLoadInd = "N
                     } else {
                         apex.region("mod_block_details").refresh();
                     }
+                    await add_pog_versions();
                     await runattrCollections();
-                    wpdCaptureShowChangesBlockSnapshot(g_mod_block_list, "Y"); // ASA-1986
-                    add_pog_versions();
+                    capture_changes_blk_snapshot(g_mod_block_list, "Y"); // ASA-1986
+                    g_reset_block_snapshot = JSON.parse(JSON.stringify(g_mod_block_list));                    
                     render(0);
                     animate_all_pog();
                 }
                 doSomething();
             }
-        } else {
+        } 
+        else {
             $("#pog_list_btn").css("display", "block");
             $("#chng_view_btn").css("display", "block");
             $(".add_pog").css("display", "block");
@@ -9037,317 +6593,9 @@ async function open_existing_pog(p_pog_list_arr, p_openAttr, p_imageLoadInd = "N
     }
 }
 
-async function auto_fill_setup(p_pog_index, p_af_version = '') {
-
-    console.log("pog json length", g_pog_json[p_pog_index], g_pog_json.length);
-
-    return new Promise((resolve, reject) => {
-
-        if (g_all_pog_flag == "N" || (g_all_pog_flag == "Y" && g_pog_json.length == 1)) {
-
-            $s("P193_OPEN_POG_CODE", `${g_pog_json[p_pog_index].POGCode}`);
-            $s("P193_OPEN_POG_VERSION", `${g_pog_json[p_pog_index].Version}`);
-
-            if (g_auto_fill_active == "N" && typeof g_pog_json[p_pog_index] !== undefined && g_pog_json.length > 0) {
-
-                apex.server.process(
-                    "GET_AUTOFILL",
-                    {
-                        x01: $v("P193_OPEN_POG_CODE"),
-                        x02: $v("P193_OPEN_DRAFT") == "Y" ? $v("P193_EXISTING_DRAFT_VER") : $v("P193_OPEN_POG_VERSION"),
-                        x03: $v("P193_OPEN_DRAFT"),
-                        x04: p_af_version,
-                    },
-                    {
-                        dataType: "json",
-
-                        success: async function (pData) {
-
-                            try {
-
-                                var return_data = $.trim(pData).split(",");
-
-                                if (return_data[0] == "ERROR") {
-                                    raise_error(pData);
-                                    resolve();
-                                    return;
-                                }
-
-                                var item_exists = false;
-                                var i = 0;
-
-                                for (const modules_info of g_pog_json[p_pog_index].ModuleInfo) {
-                                    if (item_exists) break;
-
-                                    if (typeof modules_info.ParentModule == "undefined" || modules_info.ParentModule == null) {
-
-                                        for (const shelf_info of modules_info.ShelfInfo) {
-                                            if (item_exists) break;
-
-                                            if (
-                                                shelf_info.ObjType !== "BASE" &&
-                                                shelf_info.ObjType !== "NOTCH" &&
-                                                shelf_info.ObjType !== "DIVIDER" &&
-                                                shelf_info.ObjType !== "TEXTBOX"
-                                            ) {
-                                                const items = Array.isArray(shelf_info.ItemInfo)
-                                                    ? shelf_info.ItemInfo
-                                                    : (shelf_info.ItemInfo ? [shelf_info.ItemInfo] : []);
-
-                                                for (const item_info of items) {
-                                                    if (item_info.Item !== "DIVIDER") {
-                                                        item_exists = true;
-                                                        break;
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    i++;
-                                }
-
-                                if ((item_exists) || p_af_version != '') {
-
-                                    async function doSomething() {
-
-                                        g_auto_fill_active = "Y";
-                                        $s("P193_BLOCK_SELECTION", "P");
-                                        g_undo_final_obj_arr = [];
-                                        g_redo_final_obj_arr = [];
-                                        g_prev_undo_action = "";
-
-                                        if (p_af_version == '') {
-                                            await clear_item("N", "N", p_pog_index);
-                                        }
-
-                                        g_undo_final_obj_arr = [];
-                                        g_redo_final_obj_arr = [];
-                                        g_auto_fill_reg_open = "Y";
-
-                                        if (typeof pData.AFVersion != "undefined" || typeof g_autofill_detail["AFVersion"] != "undefined") {
-
-                                            if (typeof g_autofill_detail["AFVersion"] == "undefined") {
-                                                g_autofill_detail["AFPOGCode"] = pData.AFPOGCode;
-                                                g_autofill_detail["AFPOGVersion"] = pData.AFPOGVersion;
-                                                g_autofill_detail["AFVersion"] = pData.AFVersion;
-                                                g_autofill_detail["BlkSelType"] = pData.AFType;
-                                                g_autofill_detail["AutofillRule"] = pData.AFRule;
-                                                g_autofill_detail["BlkInfo"] = JSON.parse(pData.AFJSON).BlkInfo;
-                                            }
-
-                                            $s("P193_BLOCK_SELECTION", g_autofill_detail.BlkSelType);
-                                            $s("P193_AF_VERSION", g_autofill_detail.AFVersion);
-                                            $s("P193_AUTOFILL_RULE", g_autofill_detail.AutofillRule);
-
-                                            if ($v("P193_BLOCK_SELECTION") == "M") {
-
-                                                g_mod_block_list = g_autofill_detail["BlkInfo"];
-
-                                                async function doSomething() {
-
-                                                    for (const blkDet of g_mod_block_list) {
-
-                                                        g_autofillModInfo = blkDet.BlkModInfo;
-                                                        g_autofillShelfInfo = blkDet.BlkShelfInfo;
-
-                                                        var retdtl = await colorAutofillBlock(
-                                                            blkDet["DragMouseStart"],
-                                                            blkDet["DragMouseEnd"],
-                                                            blkDet["mod_index"],
-                                                            blkDet["BlkColor"],
-                                                            blkDet["BlkName"],
-                                                            "U",
-                                                            blkDet,
-                                                            g_pog_index
-                                                        );
-
-                                                        blkDet["BlockDim"] = retdtl;
-                                                    }
-
-                                                    g_autofill_detail["BlkInfo"] = g_mod_block_list;
-                                                    await save_blk_dtl_coll("Y", "", g_mod_block_list);
-                                                    g_mod_block_list = g_autofill_detail["BlkInfo"];
-                                                    wpdCaptureShowChangesBlockSnapshot(g_mod_block_list, p_af_version !== '' ? "Y" : "N");  //ASA-1986 
-                                                }
-
-                                                await doSomething();
-                                            }
-                                        }
-                                    }
-
-                                    await doSomething();
-                                }
-
-                                resolve();
-
-                            } catch (err) {
-                                reject(err);
-                            }
-                        },
-
-                        error: function (err) {
-                            reject(err);
-                        }
-                    }
-                );
-
-            } else {
-                resolve();
-            }
-
-        } else {
-            alert(get_message("POGCR_AUTOFILL_VALID"));
-            resolve();
-        }
-
-    });
-}
-
-
-async function clear_item(p_info_called, p_clearInfoType, p_pog_index) {
-    logDebug("function : clear_item; info_called : " + p_info_called + "; p_clearInfoType : " + p_clearInfoType, "S");
-    try {
-        //identify if any change in POG
-        g_pog_edited_ind = "Y";
-
-        if (p_info_called == "N") {
-            $(".top_icon").removeClass("active");
-            $(".left_icon").removeClass("active");
-            $(".clear_item").addClass("active");
-        }
-        var prev_action = p_info_called == "N" ? "CLEAR_ITEM" : "CLEAR_POG_INFO";
-        var module_details = g_pog_json[p_pog_index].ModuleInfo;
-        g_undo_obj_arr = [];
-        g_undo_details = [];
-        g_undo_supp_obj_arr = [];
-        var undoObjectsInfo = [];
-        var g_deletedItems = [];
-        if (prev_action == "CLEAR_POG_INFO") {
-            var pogInfo = {};
-            pogInfo["OldPOGCode"] = g_pog_json[p_pog_index].POGCode;
-            pogInfo["OldPOGName"] = g_pog_json[p_pog_index].Name;
-            pogInfo["OldPOGDivision"] = g_pog_json[p_pog_index].Division;
-            pogInfo["OldPOGDept"] = g_pog_json[p_pog_index].Dept;
-            pogInfo["OldPOGSubDept"] = g_pog_json[p_pog_index].SubDept;
-            pogInfo["OldEffStartDate"] = g_pog_json[p_pog_index].EffStartDate;
-        }
-        $.each(module_details, function (i, modules_info) {
-            if (typeof modules_info.ParentModule == "undefined" || modules_info.ParentModule == null) {
-                //capture the module is edit or not to create changed text box
-                g_pog_json[p_pog_index].ModuleInfo[i].EditFlag = "Y";
-
-                $.each(modules_info.ShelfInfo, function (j, shelf_info) {
-                    if (shelf_info.ItemInfo.length > 0) {
-                        $.each(shelf_info.ItemInfo, function (s, itemInfo) {
-                            g_deletedItems.push(itemInfo.ItemID);
-                        });
-                        var objectID = g_pog_json[p_pog_index].ModuleInfo[i].ShelfInfo[j].SObjID;
-                        undoObjectsInfo.moduleIndex = i;
-                        undoObjectsInfo.module = g_pog_json[p_pog_index].ModuleInfo[i].Module;
-                        undoObjectsInfo.shelfIndex = j;
-                        undoObjectsInfo.pogInfo = pogInfo;
-                        undoObjectsInfo.actionType = "ITEM_DELETE";
-                        undoObjectsInfo.startCanvas = g_start_canvas;
-                        undoObjectsInfo.objectID = objectID;
-                        undoObjectsInfo.g_deletedItems = g_deletedItems;
-                        undoObjectsInfo.moduleObjectID = g_pog_json[p_pog_index].ModuleInfo[i].MObjID;
-                        undoObjectsInfo.push(JSON.parse(JSON.stringify(g_pog_json[p_pog_index].ModuleInfo[i].ShelfInfo[j])));
-                        g_allUndoObjectsInfo.push(undoObjectsInfo);
-                        undoObjectsInfo = [];
-                    }
-                });
-            }
-        });
-
-        await delete_items("Y", p_pog_index);
-        logFinalUndoObjectsInfo("ITEM_DELETE", "U", g_allUndoObjectsInfo, "", "Y", "N", "N", "N", "N", "N");
-        g_allUndoObjectsInfo = [];
-        showFixelAvailableSpace("N", "N", p_pog_index);
-        render(p_pog_index);
-        //recreate the orientation view if any present
-        await recreate_compare_views(g_compare_view, "N");
-
-        apex.message.showPageSuccess(g_pog_refresh_msg);
-        logDebug("function : clear_item", "E");
-        return "SUCCESS";
-    } catch (err) {
-        error_handling(err);
-    }
-}
-
-function save_blk_dtl_coll(p_action_ind, p_blk_name, p_block_details_arr) {
-    return new Promise(function (resolve, reject) {
-        apex.server.process(
-            "SAVE_BLOCK_LIST", {
-            x01: p_action_ind,
-            x02: p_blk_name,
-            p_clob_01: JSON.stringify(p_block_details_arr),
-        }, {
-            dataType: "text",
-            success: async function (pData) {
-                console.log("pData", pData);
-                //apex.region("mod_block_details").refresh();
-                if (p_action_ind == "Y" || p_action_ind == "U") {
-                    g_autofill_edit = "N";
-                }
-
-                resolve("success");
-            },
-            loadingIndicatorPosition: "page",
-        });
-    });
-}
-
-function delete_items(p_delete_obj, p_pog_index) {
-    logDebug("function : delete_items; delete_obj : " + p_delete_obj, "S");
-    //console.log('delete_items called');
-    return new Promise(function (resolve, reject) {
-        var module_details = g_pog_json[p_pog_index].ModuleInfo;
-        if (p_delete_obj == "N") {
-            g_pog_json[p_pog_index].POGCode = "";
-            g_pog_json[p_pog_index].Name = "";
-        }
-        $.each(module_details, function (i, modules_info) {
-            if (typeof modules_info.ParentModule == "undefined" || modules_info.ParentModule == null) {
-                $.each(modules_info.ShelfInfo, function (j, shelf_info) {
-                    var div_obj = {};
-                    var add_div_item = "N";
-                    if (p_delete_obj == "Y") {
-                        $.each(shelf_info.ItemInfo, function (k, item_info) {
-                            if (item_info.Item !== "DIVIDER") {
-                                g_deletedItems.push(item_info.ItemID);
-                                var selectedObject = g_scene_objects[p_pog_index].scene.children[2].getObjectById(item_info.ObjID);
-                                g_scene_objects[p_pog_index].scene.children[2].remove(selectedObject);
-                                if (typeof g_pog_json[p_pog_index].DeleteItems !== "undefined") {
-                                    g_pog_json[p_pog_index].DeleteItems.push(item_info); ///ASA-1108
-                                }
-                            } else {
-                                div_obj = item_info;
-                                add_div_item = "Y";
-                            }
-                        });
-                    } else {
-                        $.each(shelf_info.ItemInfo, function (k, item_info) {
-                            if (item_info.Item == "DIVIDER") {
-                                div_obj = item_info;
-                                add_div_item = "Y";
-                            }
-                        });
-                    }
-                    g_pog_json[p_pog_index].ModuleInfo[i].ShelfInfo[j].ItemInfo = [];
-                    if (add_div_item == "Y") {
-                        g_pog_json[p_pog_index].ModuleInfo[i].ShelfInfo[j].ItemInfo.push(div_obj);
-                    }
-                });
-            }
-        });
-        // let dellog = deleted_items_log(g_deletedItems, "D", p_pog_index);
-        resolve("SUCCESS");
-        logDebug("function : delete_items", "E");
-    });
-}
 
 function get_below_shelf(p_shelf_details, p_mod_index, p_btm_y, p_pog_index) {
+    logDebug("function : get_below_shelf", "S");
     var final_btm = -1,
         l_shelf_cnt = 0;
     var min_distance_arr = [];
@@ -9373,10 +6621,12 @@ function get_below_shelf(p_shelf_details, p_mod_index, p_btm_y, p_pog_index) {
     } else {
         final_btm = p_btm_y;
     }
+    logDebug("function : get_below_shelf", "E");
     return final_btm;
 }
 
 function get_above_shelf(p_shelf_details, p_mod_index, p_top_y, p_mod_top, p_pog_index) {
+    logDebug("function : get_above_shelf", "S");
     var final_top = -1,
         l_shelf_cnt = 0;
     var min_distance_arr = [];
@@ -9402,6 +6652,7 @@ function get_above_shelf(p_shelf_details, p_mod_index, p_top_y, p_mod_top, p_pog
     } else {
         final_top = p_mod_top;
     }
+    logDebug("function : get_above_shelf", "E");
     return final_top;
 }
 
@@ -9419,6 +6670,7 @@ async function doMouseUp(p_x, p_y, p_event, p_prevX, p_prevY, p_canvas, p_camera
     7. edit pallet functionality.
      */
     try {
+
         var locationX, locationY, locationZ;
         var width = p_canvas.width; // / window.devicePixelRatio;
         var height = p_canvas.height; // / window.devicePixelRatio;
@@ -9437,7 +6689,7 @@ async function doMouseUp(p_x, p_y, p_event, p_prevX, p_prevY, p_canvas, p_camera
         var l_final_x = Math.min(19, Math.max(-19, coords.x)); // clamp coords to the range -19 to 19, so object stays on ground
         var l_final_y = Math.min(19, Math.max(-19, coords.y));
         var z = g_drag_z;
-      // In Show Changes (POG compare view), a plain click should not trigger drag-end camera refit.
+        // In Show Changes (POG compare view), a plain click should not trigger drag-end camera refit.
         // Without this guard, click-only selection may execute drag-end paths and unexpectedly change zoom.
         var isClickWithoutDrag = Math.abs(p_x - p_prevX) <= 2 && Math.abs(p_y - p_prevY) <= 2;
         if (g_compare_pog_flag == "Y" && g_compare_view == "POG" && isClickWithoutDrag && g_selecting !== true && g_auto_fill_active == "N") {
@@ -9483,6 +6735,37 @@ async function doMouseUp(p_x, p_y, p_event, p_prevX, p_prevY, p_canvas, p_camera
             }
         }
 
+        try {
+            if (g_block_resize_state && g_block_resize_state.active && g_block_resize_state.blkRef) {
+                // call colorAutofillBlock one final time to persist and update BlockDim
+                var blkRef = g_block_resize_state.blkRef;
+                await colorAutofillBlock(null, null, blkRef.mod_index, blkRef.BlkColor || '#FFFFFF', blkRef.BlkName, 'U', blkRef, g_pog_index, 'N').then(function (ret) {
+                    if (ret) blkRef.BlockDim = Object.assign(blkRef.BlockDim || {}, ret);
+                });
+                // Sync BlkModInfo[0].dragStart/dragEnd to the new block bounds so that
+                // getAutofillModShelf does not treat the freed space as still occupied.
+                try {
+                    if (blkRef.BlkModInfo && blkRef.BlkModInfo[0] && blkRef.BlockDim) {
+                        var l_mod_index = Array.isArray(blkRef.mod_index) && blkRef.mod_index.length > 0 ? blkRef.mod_index[0] : -1;
+                        if (l_mod_index > -1 && g_pog_json[g_pog_index] && g_pog_json[g_pog_index].ModuleInfo[l_mod_index]) {
+                            var moduleX = Number(g_pog_json[g_pog_index].ModuleInfo[l_mod_index].X || 0);
+                            var newCalcX = Number(blkRef.BlockDim.CalcX || 0);
+                            var newWidth = Number(blkRef.BlockDim.BlkWidth || 0);
+                            blkRef.BlkModInfo[0].dragStart = moduleX + newCalcX - newWidth / 2;
+                            blkRef.BlkModInfo[0].dragEnd = moduleX + newCalcX + newWidth / 2;
+                        }
+                    }
+                } catch (e) { console.warn('BlkModInfo resize sync err', e); }
+                render(g_pog_index);
+                // cleanup
+                g_block_resize_state.active = false;
+                g_block_resize_state.blkName = null;
+                g_block_resize_state.blkRef = null;
+                try { var el = document.getElementById('blockResizeHint'); if (el) el.remove(); } catch (e) { }
+                try { $('#maincanvas').css('cursor', 'auto'); } catch (e) { }
+            }
+        } catch (e) { console.warn('Finalize resize err', e); }
+
         if (g_delete_details.length > 0 && g_duplicating == "Y") {
             g_multiItemCopy = "Y";
         } else {
@@ -9494,6 +6777,7 @@ async function doMouseUp(p_x, p_y, p_event, p_prevX, p_prevY, p_canvas, p_camera
             if (g_selecting && g_multiselect == "Y" && g_shift_mutli_item_select == "N") {
                 g_duplicating = "N";
                 await get_multiselect_obj(p_pog_index);
+                get_multiselect_blocks(p_pog_index);
                 if (g_area_zoom_ind == "Y") {
                     select_zoom(p_camera, p_pog_index);
                     g_area_zoom_ind = "N";
@@ -9507,6 +6791,23 @@ async function doMouseUp(p_x, p_y, p_event, p_prevX, p_prevY, p_canvas, p_camera
             } else if (g_shift_mutli_item_select == "Y") {
                 multiSelectItemsWithShift(p_pog_index, g_multi_select_offset_perc);
             }
+
+            // ── FIX: g_selecting can still be true here when the user clicks
+            //    without moving (g_multiselect stays "N" so the block above is
+            //    skipped entirely). g_selecting must ALWAYS be false after mouseup
+            //    otherwise every subsequent mousemove keeps drawing the rubber-band
+            //    from the old click position. ─────────────────────────────────────
+            if (g_selecting) {
+                g_selecting = false;
+                g_startMouse.x = 0;
+                g_startMouse.y = 0;
+                g_DragMouseStart.x = 0;
+                g_DragMouseStart.y = 0;
+                g_DragMouseEnd.x = 0;
+                g_DragMouseEnd.y = 0;
+                g_selection.style.visibility = "hidden";
+            }
+            // ── END FIX ──────────────────────────────────────────────────────────
         }
 
         $("#maincanvas").css("cursor", "auto");
@@ -9533,40 +6834,28 @@ async function doMouseUp(p_x, p_y, p_event, p_prevX, p_prevY, p_canvas, p_camera
             [g_autofillModInfo, g_autofillShelfInfo] = getAutofillModShelf(g_DragMouseStart, g_DragMouseEnd, g_pog_json, g_pog_index);
             // if (g_delete_details.length > 0) {
             if (g_autofillShelfInfo.length >= 1) { //ASA-1965- issue-1  Additional fix
-                // var multi_mod = false;
-                // var mod_ind = -1;
-                // for (const objects of g_delete_details) {
-                //     if (objects.ObjType !== "TEXTBOX") {
-                //         if (mod_ind !== objects.MIndex && mod_ind !== -1) {
-                //             multi_mod = true;
-                //             break;
-                //         }
-                //         mod_ind = objects.MIndex;
-                //     }
-                // }
-                // if (multi_mod) {
-                //     g_delete_details = [];
-                //     alert(get_message("POGCR_SINGLE_MOD"));
-                //     return;
-                // } else {
                 apex.region("block_filters").widget().interactiveGrid("getActions").set("edit", false);
                 apex.region("block_filters").widget().interactiveGrid("getViews", "grid").model.clearChanges();
                 apex.region("block_filters").refresh();
                 apex.event.trigger("#P193_BLK_RULE", "apexrefresh");
+                $s("P193_EDIT_BLK", "");  // clear stale edit-block name so setAutofillBlock reads $v("P193_BLK_NAME") for the new block
                 $s("P193_BLK_NAME", "");
-                $s("P193_BLK_COLOR", randomColor());
+                $s("P193_BLK_COLOR", randomColor()?.toUpperCase());
                 $s("P193_BLK_FILTER", "");
+                // Ensure fields are never stuck disabled from a previous multiselect open
+                apex.item("P193_BLK_NAME").enable();
+                apex.item("P193_BLK_COLOR").enable();
+                apex.item("P193_BLK_RULE").enable();
                 $("#ADD_BLK").css("display", "inline");
                 $("#SAVE_BLK").css("display", "inline");
                 $("#UPDATE_BLK").css("display", "none");
                 openInlineDialog("block_details", 40, 65);
-                // }
                 //ASA-1697 - End
                 // } else if (typeof g_dragItem !== "undefined" && g_dragItem.length > 0 && g_drag_inprogress == "Y") {
                 //ASA-1965 task-3 start
             } else if (typeof g_dragItem !== "undefined" && g_dragItem != null && g_drag_inprogress == "Y" && ((g_dragItem.length && g_dragItem.length > 0) || (typeof g_dragItem.uuid !== 'undefined') || typeof g_dragItem === 'object')) {
                 //ASA-1085 added autofill dragging block
-                // try { console.log('AUTO_FILL_DROP: entering branch', {g_dragItem, dragItemType: typeof g_dragItem, hasLength: g_dragItem && g_dragItem.length, hasUuid: g_dragItem && g_dragItem.uuid, g_drag_inprogress}); } catch (e) {} //ASA -1965-task-3
+                try { clearAutofillBlockHighlight(); } catch (e) { /* ignore */ }
                 var curr_module = getAutoFillCurrModule(l_final_x, l_final_y, g_module_index, p_pog_index);
                 if (typeof curr_module === "undefined" || curr_module === -1) {  // ASA-1965 Additional fix
                     try {
@@ -9577,7 +6866,8 @@ async function doMouseUp(p_x, p_y, p_event, p_prevX, p_prevY, p_canvas, p_camera
                         }
                         if (dragUuid) {
                             var dragBlock = g_mod_block_list.filter(function (f) { return f.BlkName == dragUuid; });
-                            if (dragBlock && dragBlock.length > 0 && dragBlock[0].BlockDim) {
+                            // ── FIX: Guard against dragBlock[0] being undefined on first drag ──
+                            if (dragBlock && dragBlock.length > 0 && dragBlock[0] && dragBlock[0].BlockDim) {
                                 var orgX = dragBlock[0].BlockDim.CalcX,
                                     orgY = dragBlock[0].BlockDim.CalcY,
                                     orgZ = dragBlock[0].BlockDim.CalcZ;
@@ -9587,69 +6877,187 @@ async function doMouseUp(p_x, p_y, p_event, p_prevX, p_prevY, p_canvas, p_camera
                                     render(p_pog_index);
                                     alert(get_message('VALIDATE_SWAP_BLOCK_MSG'));
                                 }
+                            } else {
+                                // dragBlock not found or BlockDim missing — just render and bail gracefully
+                                render(p_pog_index);
                             }
+                            // ── END FIX ───────────────────────────────────────────────────────
                         }
                     } catch (e) { }
                     g_dragItem = undefined;
                     return false;
                 } //ASA_1965 Additional fix END
+
                 if (typeof curr_module !== "undefined" && curr_module !== -1) {
                     var blockStart = {},
                         blockEnd = {},
                         blockFound = false;
-                    // var dragBlock = g_mod_block_list.filter((f) => {
-                    //     if (f.BlkName == g_dragItem.uuid) {
-                    //         return true;
-                    //     }
+
                     var dragUuid = null; //ASA-1965 task-3
                     if (g_dragItem) {
                         if (typeof g_dragItem.uuid !== 'undefined') dragUuid = g_dragItem.uuid;
                         else if (g_dragItem.length && g_dragItem.length > 0 && g_dragItem[0] && typeof g_dragItem[0].uuid !== 'undefined') dragUuid = g_dragItem[0].uuid;
                     }
-                    // try { console.log('AUTO_FILL_DROP: resolved dragUuid', dragUuid); } catch (e) {}
+
                     if (!dragUuid) {
-                        // nothing we can do - revert selection and exit
-                        // try { console.log('AUTO_FILL_DROP: no drag uuid, aborting drop-handling'); } catch (e) {}
                         g_dragItem = undefined;
                         return false;
                     }
+
                     var dragBlock = g_mod_block_list.filter((f) => {
                         return f.BlkName == dragUuid;
-                        //ASA-1965 task-3
                     });
+
+                    // ── FIX: Guard dragBlock[0] and BlockDim before any access ──────────
+                    // On the very first drag, g_mod_block_list may not yet contain an
+                    // entry matching dragUuid (the block was just rendered but the list
+                    // entry hasn't been fully initialised). Without this guard the code
+                    // crashes with "Cannot read properties of undefined (reading 'BlockDim')"
+                    // and rolls back the drag. On the second drag the list is populated so
+                    // it succeeds. We revert the visual position and exit cleanly instead.
+                    if (!dragBlock || dragBlock.length === 0 || !dragBlock[0] || !dragBlock[0].BlockDim) {
+                        try {
+                            // Snap the dragged mesh back to wherever it currently sits
+                            // (we have no CalcX/Y to revert to, so just re-render as-is)
+                            if (g_dragItem && g_dragItem.position && typeof g_dragItem.updateMatrix === 'function') {
+                                g_dragItem.updateMatrix();
+                                render(p_pog_index);
+                            }
+                        } catch (e) { }
+                        g_dragItem = undefined;
+                        return false;
+                    }
+                    // ── END FIX ──────────────────────────────────────────────────────────
+
                     blockStart.x = g_pog_json[p_pog_index].ModuleInfo[curr_module].X - g_pog_json[p_pog_index].ModuleInfo[curr_module].W / 2;
                     blockStart.y = l_final_y + dragBlock[0].BlockDim.BlkHeight / 2;
                     blockEnd.x = g_pog_json[p_pog_index].ModuleInfo[curr_module].X + g_pog_json[p_pog_index].ModuleInfo[curr_module].W / 2;
                     blockEnd.y = l_final_y - dragBlock[0].BlockDim.BlkHeight / 2;
                     var currShelf = getAutoFillCurrShelf(blockStart, blockEnd, curr_module, p_pog_index); //ASA-1085
                     if (typeof curr_module !== "undefined" && curr_module !== -1) {
+                        // l_final_x/y are in world/scene space.
+                        // CalcX is module-local (mesh is child of ColorObj which sits at moduleX).
+                        // Convert block bounds to world space: world = moduleX + CalcX.
+                        var dragLeft = l_final_x - dragBlock[0].BlockDim.BlkWidth / 2;
+                        var dragRight = l_final_x + dragBlock[0].BlockDim.BlkWidth / 2;
+                        var dragTop = l_final_y + dragBlock[0].BlockDim.BlkHeight / 2;
+                        var dragBottom = l_final_y - dragBlock[0].BlockDim.BlkHeight / 2;
                         for (colorObj of g_mod_block_list) {
                             if (colorObj.BlkName !== g_dragItem.uuid) {
-                                var fnTop = colorObj.BlockDim.FinalTop;
-                                var fnBtm = colorObj.BlockDim.FinalBtm;
-                                var fnTopX = g_pog_json[p_pog_index].ModuleInfo[colorObj.mod_index[0]].X - g_pog_json[p_pog_index].ModuleInfo[colorObj.mod_index[0]].W / 2;
-                                var fnBtmX = g_pog_json[p_pog_index].ModuleInfo[colorObj.mod_index[0]].X + g_pog_json[p_pog_index].ModuleInfo[colorObj.mod_index[0]].W / 2;
-                                if (fnTop > l_final_y && fnBtm < l_final_y && fnTopX < l_final_x && fnBtmX > l_final_x) {
+                                // Convert CalcX (module-local) to world X for comparison with l_final_x
+                                var blkModX = g_pog_json[p_pog_index].ModuleInfo[colorObj.mod_index[0]].X;
+                                var blkLeft = blkModX + colorObj.BlockDim.CalcX - colorObj.BlockDim.BlkWidth / 2;
+                                var blkRight = blkModX + colorObj.BlockDim.CalcX + colorObj.BlockDim.BlkWidth / 2;
+                                // FinalTop/FinalBtm are already in world Y — matches l_final_y
+                                var blkTop = colorObj.BlockDim.FinalTop;
+                                var blkBottom = colorObj.BlockDim.FinalBtm;
+
+                                var overlap =
+                                    dragLeft < blkRight &&
+                                    dragRight > blkLeft &&
+                                    dragTop > blkBottom &&
+                                    dragBottom < blkTop;
+
+                                if (overlap) {
+
                                     await swapColoredBlocks(colorObj, dragBlock[0], p_pog_index);
-                                    // await save_blk_dtl_coll("Y", "", g_mod_block_list); //ASA-1965 task-3
+
                                     g_dragItem = undefined;
                                     blockFound = true;
-                                    // open_blk_details(dragBlock[0].BlkName, "N");
-                                    render(p_pog_index); //ASA-1965 task-3
+
+                                    render(p_pog_index);
+
                                     return true;
                                 }
                             }
                         }
+                
+                        // if (!blockFound) {
+                        //     if (currShelf === -1) {
+                        //         dragBlock[0].BlockDim.ColorObj.remove(g_dragItem);
+                        //         dragBlock[0].mod_index = [curr_module];
+                        //         var rtl = await add_module_autofill_color(blockStart, blockEnd, [curr_module], dragBlock[0].BlkColor, dragBlock[0].BlkName, "Y", dragBlock[0], p_pog_index, "Y");
+                        //         dragBlock[0].BlockDim = rtl;
+                        //         await save_blk_dtl_coll("Y", "", g_mod_block_list); //ASA-1965 task-3
+                        //         render(p_pog_index); //ASA-1965 task-3
+                        //     } else {
+                        //         var orgX = dragBlock[0].BlockDim.CalcX,
+                        //             orgY = dragBlock[0].BlockDim.CalcY,
+                        //             orgZ = dragBlock[0].BlockDim.CalcZ;
+                        //         g_dragItem.position.set(orgX, orgY, orgZ);
+                        //         g_dragItem.updateMatrix();
+                        //         render(p_pog_index);
+                        //         alert(get_message('VALIDATE_SWAP_BLOCK_MSG'));
+                        //     }
+                        // }
                         if (!blockFound) {
-                            if (currShelf === -1) {
-                                dragBlock[0].BlockDim.ColorObj.remove(g_dragItem);
-                                dragBlock[0].mod_index = [curr_module];
-                                var rtl = await add_module_autofill_color(blockStart, blockEnd, [curr_module], dragBlock[0].BlkColor, dragBlock[0].BlkName, "Y", dragBlock[0], p_pog_index, "Y");
-                                dragBlock[0].BlockDim = rtl;
-                                await save_blk_dtl_coll("Y", "", g_mod_block_list); //ASA-1965 task-3
-                                // open_blk_details(dragBlock[0].BlkName, "N");
-                                render(p_pog_index); //ASA-1965 task-3
+
+                            // Only allow placement within the same module as the drag block
+                            var dragOrigModule = dragBlock[0].mod_index[0];
+                            if (curr_module !== dragOrigModule) {
+                                var orgX = dragBlock[0].BlockDim.CalcX,
+                                    orgY = dragBlock[0].BlockDim.CalcY,
+                                    orgZ = dragBlock[0].BlockDim.CalcZ;
+                                g_dragItem.position.set(orgX, orgY, orgZ);
+                                g_dragItem.updateMatrix();
+                                render(p_pog_index);
+                                alert(get_message('VALIDATE_SWAP_BLOCK_MSG'));
+                                g_dragItem = undefined;
+                                return false;
+                            }
+
+                            // l_final_x is in world/scene space; CalcX is module-local (ColorObj is
+                            // positioned at the module centre, so local = world - moduleX).
+                            var moduleX = g_pog_json[p_pog_index].ModuleInfo[curr_module].X;
+                            var moduleW = g_pog_json[p_pog_index].ModuleInfo[curr_module].W;
+                            var localDropX = l_final_x - moduleX;  // convert to module-local space
+                            var dragW = dragBlock[0].BlockDim.BlkWidth;
+
+                            // Clamp to module-local bounds (-W/2 … +W/2)
+                            var newCalcX = Math.max(-moduleW / 2 + dragW / 2, Math.min(moduleW / 2 - dragW / 2, localDropX));
+                            var newLeft = newCalcX - dragW / 2;
+                            var newRight = newCalcX + dragW / 2;
+
+                            // Check if new position overlaps any other block in the same module.
+                            // All CalcX values are already module-local so comparison is direct.
+                            var canPlace = false;
+                            for (let blk of g_mod_block_list) {
+                                if (blk.BlkName === dragBlock[0].BlkName) continue;
+                                if (blk.mod_index[0] !== curr_module) continue;
+                                var blkLeft = blk.BlockDim.CalcX - blk.BlockDim.BlkWidth / 2;
+                                var blkRight = blk.BlockDim.CalcX + blk.BlockDim.BlkWidth / 2;
+                                if (newRight > blkLeft && newLeft < blkRight) {
+                                    canPlace = true;
+                                    break;
+                                }
+                            }
+
+                            if (canPlace) {
+                                // Place block at new local X, keep same Y/Z and dimensions
+                                dragBlock[0].BlockDim.CalcX = newCalcX;
+                                g_dragItem.position.x = newCalcX;
+                                g_dragItem.position.y = dragBlock[0].BlockDim.CalcY;
+                                g_dragItem.updateMatrix();
+                                refreshBlockLabelMesh(
+                                    dragBlock[0].BlockDim.ColorObj,
+                                    dragBlock[0].BlkName,
+                                    dragBlock[0].BlkColor,
+                                    newCalcX,
+                                    dragBlock[0].BlockDim.CalcY,
+                                    dragBlock[0].BlockDim.BlkWidth,
+                                    dragBlock[0].BlockDim.BlkHeight
+                                );
+                                // Sync BlkModInfo world-space bounds so getAutofillModShelf
+                                // treats the old position as freed after a block is moved.
+                                if (dragBlock[0].BlkModInfo && dragBlock[0].BlkModInfo[0]) {
+                                    dragBlock[0].BlkModInfo[0].dragStart = moduleX + newCalcX - dragW / 2;
+                                    dragBlock[0].BlkModInfo[0].dragEnd   = moduleX + newCalcX + dragW / 2;
+                                }
+                                await save_blk_dtl_coll("Y", "", g_mod_block_list);
+                                render(p_pog_index);
+                                g_dragItem = undefined;
                             } else {
+                                // Revert — no valid empty space at drop position
                                 var orgX = dragBlock[0].BlockDim.CalcX,
                                     orgY = dragBlock[0].BlockDim.CalcY,
                                     orgZ = dragBlock[0].BlockDim.CalcZ;
@@ -9669,7 +7077,6 @@ async function doMouseUp(p_x, p_y, p_event, p_prevX, p_prevY, p_canvas, p_camera
                     }
                 }
             }
-            // } else if (g_shift_mutli_item_select !== "Y" && ((g_mselect_drag == "Y" && g_start_canvas == g_present_canvas && g_duplicating == "N" && g_drag_inprogress == "N" && g_compare_view !== "PREV_VERSION") || (g_canvas_drag == "Y" && g_mselect_drag == "Y" && g_start_canvas !== g_present_canvas && g_duplicating == "N" && g_compare_view !== "PREV_VERSION"))) {   // ASA-1548
         } else if (g_shift_mutli_item_select !== "Y" && ((g_mselect_drag == "Y" && g_start_canvas == g_present_canvas && g_duplicating == "N" && g_drag_inprogress == "N") || (g_canvas_drag == "Y" && g_mselect_drag == "Y" && g_start_canvas !== g_present_canvas && g_duplicating == "N" && g_compare_view !== "PREV_VERSION"))) {
             // ASA-1548
             //ASA-1422
@@ -9696,7 +7103,6 @@ async function doMouseUp(p_x, p_y, p_event, p_prevX, p_prevY, p_canvas, p_camera
             //so we revert back the object to old position.
             if (g_start_canvas !== g_present_canvas && g_drag_inprogress == "Y" && g_compare_view != "PREV_VERSION") {
                 //ASA-1507 #3
-                // if (g_start_canvas !== g_present_canvas && g_drag_inprogress == "Y") {  //ASA-1507 #3
                 var new_shelfdtl = g_pog_json[g_start_canvas].ModuleInfo[g_module_index].ShelfInfo[g_shelf_index];
                 g_world = g_scene_objects[g_start_canvas].scene.children[2];
                 if (g_shelf_edit_flag == "Y") {
@@ -9825,9 +7231,7 @@ async function doMouseUp(p_x, p_y, p_event, p_prevX, p_prevY, p_canvas, p_camera
                         comb_shelf_ind = "Y";
                     }
                     // ASA-1361 20240501
-                    // if ($v("P193_POGCR_COMBINATION_SHELF") == "Y") {
                     cnfrm = await getconfirm_shelfmove(p_pog_index);
-                    // }
                     if (g_pog_json[p_pog_index].ModuleInfo[curr_module].H > 0.1 && g_shelf_object_type !== "ROD" && g_shelf_object_type !== "TEXTBOX" && g_auto_position_ind == "Y") {
                         /*auto position button is on find the module behind the fixel drop position and find the corner of
                         module and place fixel there*/
@@ -9966,13 +7370,9 @@ async function doMouseUp(p_x, p_y, p_event, p_prevX, p_prevY, p_canvas, p_camera
                                 g_dragItem.position.z = 0.005;
                             } else if (g_shelf_object_type == "TEXTBOX") {
                                 g_dragItem.position.z = 0.0005;
-                                //ASA-1544 - Start
-                                // } else if (g_shelf_object_type == "SHELF") {
                             } else {
                                 g_dragItem.position.z = nvl(g_dragItem.position.z) == 0 ? 0.00015 : g_dragItem.position.z;
-                                // g_dragItem.position.z = 0.00015;
                             }
-                            //ASA-1544 - End
                         }
                     }
                 }
@@ -10154,7 +7554,6 @@ async function doMouseUp(p_x, p_y, p_event, p_prevX, p_prevY, p_canvas, p_camera
                             ItemInfo["W"] = ItemInfo["RW"];
                             shelfdtl.ItemInfo[g_item_index].W = ItemInfo["RW"];
                         }
-                        //await reset_auto_crush(g_module_index, g_shelf_index, g_item_index, p_pog_index, g_module_index, g_shelf_index); //ASA-1343 issue 1 //Task_27812
 
                         //set location of items finding the place its been dropped.
                         var [upd_item_index, new_shelf_index, new_module_index, new_object_type, g_edit_ind, ItemInfo, div_index, bottom_item_flag, bottom_item_ind] = await update_item_loc(curr_module, g_module_index, g_shelf_index, div_shelf_index, div_object_type, g_item_index, g_final_x, shelf_found, ItemInfo, shelfY, shelfHeight, l_final_y, g_pog_json, drag_direction, p_pog_index, p_pog_index); //Task_27812 issue 13
@@ -10206,11 +7605,6 @@ async function doMouseUp(p_x, p_y, p_event, p_prevX, p_prevY, p_canvas, p_camera
                         if (bottom_item_flag == "Y") {
                             bottom_item_obj = g_pog_json[p_pog_index].ModuleInfo[curr_module].ShelfInfo[div_shelf_index].ItemInfo[bottom_item_ind].ObjID;
                             shelfdtl.ItemInfo[g_item_index].BottomObjID = g_pog_json[p_pog_index].ModuleInfo[curr_module].ShelfInfo[div_shelf_index].ItemInfo[bottom_item_ind].ObjID;
-                            // for (var item of g_allUndoObjectsInfo[0][0].ItemInfo) {//use for
-                            //     if (item.ObjID == shelfdtl.ItemInfo[g_item_index].ObjID) {
-                            //         item.BottomObjID = g_pog_json[p_pog_index].ModuleInfo[curr_module].ShelfInfo[div_shelf_index].ItemInfo[bottom_item_ind].ObjID;
-                            //     }
-                            // }
                             shelfdtl.ItemInfo[g_item_index].X = g_pog_json[p_pog_index].ModuleInfo[curr_module].ShelfInfo[div_shelf_index].ItemInfo[bottom_item_ind].X;
                             g_pog_json[p_pog_index].ModuleInfo[curr_module].ShelfInfo[div_shelf_index].ItemInfo[bottom_item_ind].TopObjID = shelfdtl.ItemInfo[g_item_index].ObjID;
                             if (new_object_type == "PALLET") {
@@ -10285,30 +7679,6 @@ async function doMouseUp(p_x, p_y, p_event, p_prevX, p_prevY, p_canvas, p_camera
                         //setting item to new location
                         var l_edited_item_index = await set_item_after_drag(new_object_type, spread_product, new_module_index, new_shelf_index, upd_item_index, ItemInfo, p_pog_index);
 
-                        //// start Task_27812 issue 6 20240528
-                        /*if ((new_object_type == "SHELF" || new_object_type == "HANGINGBAR") && g_pog_json[p_pog_index].ModuleInfo[new_module_index].ShelfInfo[new_shelf_index].Combine !== "N") {
-                            var l_detail_arr = []; //ASA 1329
-                            var l_detail_obj = {}; //ASA 1329
-                            l_detail_obj["MIndex"] = new_module_index; //ASA 1329
-                            l_detail_obj["SIndex"] = new_shelf_index; //ASA 1329
-                            l_detail_obj["IIndex"] = l_edited_item_index; //ASA 1329
-                            l_detail_obj["Iobjid"] = g_pog_json[p_pog_index].ModuleInfo[new_module_index].ShelfInfo[new_shelf_index].ItemInfo[l_edited_item_index].ObjID; //ASA 1329
-                            l_detail_arr.push(l_detail_obj); //ASA 1329
-                            [currCombinationIndex, currShelfCombIndx] = getCombinationShelf(p_pog_index, g_pog_json[p_pog_index].ModuleInfo[new_module_index].ShelfInfo[new_shelf_index].Shelf);
-                            if (currCombinationIndex !== -1 && currShelfCombIndx !== -1) {
-                                await setCombinedShelfItems(p_pog_index, currCombinationIndex, currShelfCombIndx, g_final_x, 'Y', 'N', -1, l_edited_item_index, l_detail_arr); //ASA-1329
-                                new_module_index = l_detail_arr[0].MIndex; //ASA 1329
-                                new_shelf_index = l_detail_arr[0].SIndex; //ASA 1329
-                                l_edited_item_index = l_detail_arr[0].IIndex; //ASA 1329
-                            }
-                        }
-                        if ((shelfdtl.ObjType == "SHELF" || shelfdtl.ObjType == "HANGINGBAR") && g_pog_json[p_pog_index].ModuleInfo[g_module_index].ShelfInfo[g_shelf_index].Combine !== "N") {//Task_27812 issue 13 20240528
-                            [currCombinationIndex, currShelfCombIndx] = getCombinationShelf(p_pog_index, g_pog_json[p_pog_index].ModuleInfo[g_module_index].ShelfInfo[g_shelf_index].Shelf);
-                            if (currCombinationIndex !== -1 && currShelfCombIndx !== -1) {
-                                await setCombinedShelfItems(p_pog_index, currCombinationIndex, currShelfCombIndx, g_final_x, 'Y', 'N', -1, g_item_index, []);
-                                await reset_auto_crush(g_module_index, g_shelf_index, g_item_index, p_pog_index, g_module_index, g_shelf_index);
-                            }
-                        }*/
                         var i = 0; //Task_27812 issue 6 20240528 Regression Issue 11 05082024
                         for (const fitems of g_pog_json[p_pog_index].ModuleInfo[new_module_index].ShelfInfo[new_shelf_index].ItemInfo) {
                             if (fitems.ObjID == ItemInfo["ObjID"]) {
@@ -10326,12 +7696,6 @@ async function doMouseUp(p_x, p_y, p_event, p_prevX, p_prevY, p_canvas, p_camera
 
                         var items = g_pog_json[p_pog_index].ModuleInfo[new_module_index].ShelfInfo[new_shelf_index].ItemInfo[l_edited_item_index];
 
-                        //ASA-1476 ISSUE 4
-                        // if (bottom_item_flag == "N" && g_pog_json[p_pog_index].ModuleInfo[new_module_index].ShelfInfo[new_shelf_index].ItemInfo[l_edited_item_index].Item !== "DIVIDER") {
-                        //     //ASA-1085
-                        //     var res = await set_auto_facings(new_module_index, new_shelf_index, l_edited_item_index, items, "B", "I", "D", p_pog_index);
-                        // }
-
                         if (reorder_items(new_module_index, new_shelf_index, p_pog_index)) {
                             const l_invalidPosition = g_invalidPosition;
                             var i = 0;
@@ -10343,21 +7707,13 @@ async function doMouseUp(p_x, p_y, p_event, p_prevX, p_prevY, p_canvas, p_camera
                                 i++;
                             }
                             var itemindex = 0;
-                            //var l_fixed_item_validate = "N";//ASA-1286 issue 2  KUSH//Task-02_25977 should not be fixed here for hanging bar fixed item.need to find other approach
-                            // var shefl_end = parseFloat((g_pog_json[p_pog_index].ModuleInfo[new_module_index].ShelfInfo[new_shelf_index].X + g_pog_json[p_pog_index].ModuleInfo[new_module_index].ShelfInfo[new_shelf_index].W / 2).toFixed(4)); //ASA-1286 issue 2
                             for (const fitems of g_pog_json[p_pog_index].ModuleInfo[new_module_index].ShelfInfo[new_shelf_index].ItemInfo) {
                                 fitems.CType = g_pog_json[p_pog_index].ModuleInfo[new_module_index].ShelfInfo[new_shelf_index].ObjType;
-                                //ASA_1769, added itemInsidePeg param to not validate holes passing to find_pegboard_gap
                                 var new_x = get_item_xaxis(fitems.W, fitems.H, fitems.D, fitems.CType, -1, g_pog_json[p_pog_index].ModuleInfo[new_module_index].ShelfInfo[new_shelf_index].HorizGap, g_pog_json[p_pog_index].ModuleInfo[new_module_index].ShelfInfo[new_shelf_index].SpreadItem, g_pog_json[p_pog_index].ModuleInfo[new_module_index].ShelfInfo[new_shelf_index].HorizGap, new_module_index, new_shelf_index, itemindex, "Y", g_pog_json[p_pog_index].ModuleInfo[new_module_index].ShelfInfo[new_shelf_index].ItemInfo.length, "N", p_pog_index, itemInsidePeg);
                                 fitems.X = new_x;
-                                // var item_end = parseFloat((fitems.X + fitems.W / 2).toFixed(4)); //ASA-1286 issue 2  KUSH
-                                /*if (item_end >shefl_end && g_overhung_shelf_active == 'N'){//ASA-1286 issue 2  KUSH//Task-02_25977
-                                l_fixed_item_validate = "Y";
-                                } */
                                 itemindex++;
                             }
                             var return_val = "N";
-                            //check if there is difference in any dimension in POG data to DB if change validate and update all same items
                             if (check_dim_difference(new_module_index, new_shelf_index, l_edited_item_index, p_pog_index)) {
                                 return_val = await check_item_dim_valid(items, new_module_index, new_shelf_index, l_edited_item_index, p_pog_index); //ASA-1301
                             } else if (new_object_type !== "PEGBOARD") {
@@ -10365,17 +7721,12 @@ async function doMouseUp(p_x, p_y, p_event, p_prevX, p_prevY, p_canvas, p_camera
                                     //ASA-1125
                                     //ASA-1085
                                 } else {
-                                    //getting latest height and width and validate the item height in the present shelf.
                                     var return_val = update_validate_item_height(items, new_module_index, new_shelf_index, l_edited_item_index, g_final_x, new_object_type, -1, p_pog_index);
                                 }
                             }
-                            //ASA-1476 ISSUE 4
                             if (bottom_item_flag == "N" && g_pog_json[p_pog_index].ModuleInfo[new_module_index].ShelfInfo[new_shelf_index].ItemInfo[l_edited_item_index].Item !== "DIVIDER") {
                                 var res = await set_auto_facings(new_module_index, new_shelf_index, l_edited_item_index, items, "B", "I", "D", p_pog_index);
                             }
-                            /*if (l_fixed_item_validate !=="N"){ //ASA-1286 issue 2  KUSH//Task-02_25977
-                            return_val = l_fixed_item_validate;
-                            }*/
                             g_invalidPosition = l_invalidPosition;
                         }
 
@@ -10407,9 +7758,7 @@ async function doMouseUp(p_x, p_y, p_event, p_prevX, p_prevY, p_canvas, p_camera
                         info["OldIIndex"] = l_edited_item_index;
                         info["OldObjID"] = items.ObjID;
                         g_combineItemModf.push(info);
-                        //validate item width and depth and do auto crush if applicable.
                         if ((return_val == "F" || return_val == "N") && (await validate_items(item_width_arr, item_height_arr, item_depth_arr, item_index_arr, new_object_type, new_module_index, new_shelf_index, l_edited_item_index, g_edit_ind, ItemInfo["CrushHoriz"], ItemInfo["CrushVert"], ItemInfo["CrushD"], g_final_x, item_fixed, "N", "Y", bottom_item_flag, "N", drag_item_arr, "Y", "Y", "Y", p_pog_index))) {
-                            //identify if any change in POG
                             g_pog_edited_ind = "Y";
 
                             var obj_id = 0;
@@ -10425,21 +7774,14 @@ async function doMouseUp(p_x, p_y, p_event, p_prevX, p_prevY, p_canvas, p_camera
                             shelfInfoForUndo.push(movedShelfDetail);
                             if (g_shelf_index !== div_shelf_index || curr_module !== g_module_index) {
                                 try {
-                                    /*if (div_object_type == "SHELF" || div_object_type == "PALLET") {
-                                    //ASA-1085
-                                    var returnval = reset_top_bottom_objects(new_module_index, new_shelf_index, "N", p_pog_index);
-                                    }*/
                                     if (reorder_items(new_module_index, new_shelf_index, p_pog_index)) {
-                                        // ASA-1095, Start
                                         if (div_object_type == "SHELF" && (g_pog_json[p_pog_index].ModuleInfo[new_module_index].ShelfInfo[new_shelf_index].SpreadItem == "L" || g_pog_json[p_pog_index].ModuleInfo[new_module_index].ShelfInfo[new_shelf_index].SpreadItem == "R")) {
                                             var new_index = mergeAdjacentItems(p_pog_index, new_module_index, new_shelf_index, l_edited_item_index);
                                             if (new_index > -1) {
                                                 l_edited_item_index = new_index;
                                             }
                                         }
-                                        // ASA-1095, End
                                         var return_val = await recreate_all_items(new_module_index, new_shelf_index, div_object_type, "Y", g_final_x, l_edited_item_index, g_pog_json[p_pog_index].ModuleInfo[new_module_index].ShelfInfo[new_shelf_index].ItemInfo.length, "N", "N", -1, -1, g_start_canvas, "", p_pog_index, $v("P193_POGCR_DELIST_ITEM_DFT_COL"), $v("P193_MERCH_STYLE"), $v("P193_POGCR_LOAD_IMG_FROM"), $v("P193_BU_ID"), $v("P193_POGCR_ITEM_NUM_LBL_COLOR"), $v("P193_POGCR_ITEM_NUM_LABEL_POS"), $v("P193_POGCR_DISPLAY_ITEM_INFO"), "Y", itemInsidePeg); //ASA-1350 issue 6 added parameters, ASA-1769 itemInsidePeg
-                                        //ASA-1129, Start
                                         var modfIndx = -1;
                                         if (g_combineItemModf.length > 0) {
                                             for (var mf = 0; mf < g_combineItemModf.length; mf++) {
@@ -10452,10 +7794,7 @@ async function doMouseUp(p_x, p_y, p_event, p_prevX, p_prevY, p_canvas, p_camera
                                             }
                                         }
                                         var item_details = g_pog_json[p_pog_index].ModuleInfo[new_module_index].ShelfInfo[new_shelf_index].ItemInfo;
-                                        var sorto = {
-                                            X: "asc",
-                                            Y: "asc",
-                                        };
+                                        var sorto = { X: "asc", Y: "asc" };
                                         item_details.keySort(sorto);
                                         if (modfIndx !== -1) {
                                             var itemIndex = 0;
@@ -10466,14 +7805,11 @@ async function doMouseUp(p_x, p_y, p_event, p_prevX, p_prevY, p_canvas, p_camera
                                                 itemIndex++;
                                             }
                                         }
-                                        g_combineItemModf = []; //asa-1327
-                                        //ASA-1129, End
-                                        //ASA-S-1107, Start
+                                        g_combineItemModf = [];
                                         var item_blink = g_pog_json[p_pog_index].ModuleInfo[new_module_index].ShelfInfo[new_shelf_index].ItemInfo[l_edited_item_index];
                                         var selectedObject = g_scene_objects[p_pog_index].scene.children[2].getObjectById(item_blink.ObjID);
                                         g_intersected.push(selectedObject);
                                         render_animate_selected();
-                                        //ASA-S-1107, End
                                     }
                                     update_item_distance(new_module_index, new_shelf_index, p_pog_index);
                                     render(p_pog_index);
@@ -10483,26 +7819,10 @@ async function doMouseUp(p_x, p_y, p_event, p_prevX, p_prevY, p_canvas, p_camera
                                 logFinalUndoObjectsInfo("SHELF_DELETE", "U", g_allUndoObjectsInfo, "", "Y", "N", "N", "N", "N", "Y", g_carpark_item_flag);
                                 g_allUndoObjectsInfo = [];
 
-                                //capture the module is edit or not to create changed text box
                                 g_pog_json[p_pog_index].ModuleInfo[new_module_index].EditFlag = "Y";
                                 if (g_pog_json[p_pog_index].ModuleInfo[new_module_index].ShelfInfo[new_shelf_index].ObjType == "CHEST" && g_chest_as_pegboard == "Y") {
-                                    //Bug-26122 - splitting the chest
                                     g_pog_json[p_pog_index].ModuleInfo[new_module_index].ShelfInfo[new_shelf_index].ChestEdit = "Y";
                                 }
-                                // ASA-1095, Start
-                                //ASA-1327 unused code.
-                                /*if (typeof l_edited_item_index !== "undefined" && l_edited_item_index !== -1) {
-                                ItemInfo = g_pog_json[p_pog_index].ModuleInfo[new_module_index].ShelfInfo[new_shelf_index].ItemInfo[l_edited_item_index];
-                                (item_width_arr = []),
-                                (item_height_arr = []),
-                                (item_depth_arr = []),
-                                (item_index_arr = []);
-                                item_width_arr.push(parseFloat(ItemInfo.W.toFixed(3)));
-                                item_height_arr.push(parseFloat(ItemInfo.H.toFixed(3)));
-                                item_depth_arr.push(parseFloat(ItemInfo.D.toFixed(3)));
-                                item_index_arr.push(l_edited_item_index);
-                                }*/
-                                // ASA-1095, End
                             }
 
                             try {
@@ -10515,14 +7835,12 @@ async function doMouseUp(p_x, p_y, p_event, p_prevX, p_prevY, p_canvas, p_camera
                                         i++;
                                     }
                                 }
-                                // await auto_crush_items(item_width_arr, item_index_arr, shelfdtl.ObjType, g_module_index, g_shelf_index, l_edited_item_index, p_pog_index, "N", "Y"); //ASA-1079
                                 var [currCombinationIndex, currShelfCombIndx] = getCombinationShelf(p_pog_index, g_pog_json[p_pog_index].ModuleInfo[new_module_index].ShelfInfo[new_shelf_index].Shelf);
                                 var [oldcurrCombinationIndex, oldShelfCombIndx] = getCombinationShelf(p_pog_index, g_pog_json[p_pog_index].ModuleInfo[g_module_index].ShelfInfo[g_shelf_index].Shelf);
 
                                 if ((currCombinationIndex !== oldcurrCombinationIndex && currCombinationIndex > -1) || currCombinationIndex == -1 || (g_shelf_index == div_shelf_index && curr_module == g_module_index)) {
                                     if (reorder_items(g_module_index, g_shelf_index, p_pog_index)) {
                                         var return_val = await recreate_all_items(g_module_index, g_shelf_index, shelfdtl.ObjType, "Y", g_final_x, l_edited_item_index, shelfdtl.ItemInfo.length, "N", "N", -1, -1, g_start_canvas, "", p_pog_index, $v("P193_POGCR_DELIST_ITEM_DFT_COL"), $v("P193_MERCH_STYLE"), $v("P193_POGCR_LOAD_IMG_FROM"), $v("P193_BU_ID"), $v("P193_POGCR_ITEM_NUM_LBL_COLOR"), $v("P193_POGCR_ITEM_NUM_LABEL_POS"), $v("P193_POGCR_DISPLAY_ITEM_INFO"), "Y", itemInsidePeg); //ASA-1350 issue 6 added parameters, ASA-1769 itemInsidePeg
-                                        //ASA-1129, Start
                                         var modfIndx = -1;
                                         if (g_combineItemModf.length > 0) {
                                             for (var mf = 0; mf < g_combineItemModf.length; mf++) {
@@ -10535,10 +7853,7 @@ async function doMouseUp(p_x, p_y, p_event, p_prevX, p_prevY, p_canvas, p_camera
                                             }
                                         }
                                         var item_details = g_pog_json[p_pog_index].ModuleInfo[new_module_index].ShelfInfo[new_shelf_index].ItemInfo;
-                                        var sorto = {
-                                            X: "asc",
-                                            Y: "asc",
-                                        };
+                                        var sorto = { X: "asc", Y: "asc" };
                                         item_details.keySort(sorto);
                                         if (modfIndx !== -1) {
                                             var itemIndex = 0;
@@ -10549,14 +7864,11 @@ async function doMouseUp(p_x, p_y, p_event, p_prevX, p_prevY, p_canvas, p_camera
                                                 itemIndex++;
                                             }
                                         }
-                                        //ASA-1129, End
                                     }
                                 }
                                 update_item_distance(g_module_index, g_shelf_index, p_pog_index);
-                                //capture the module is edit or not to create changed text box
                                 g_pog_json[p_pog_index].ModuleInfo[g_module_index].EditFlag = "Y";
                                 if (g_pog_json[p_pog_index].ModuleInfo[g_module_index].ShelfInfo[g_shelf_index].ObjType == "CHEST" && g_chest_as_pegboard == "Y") {
-                                    //Bug-26122 - splitting the chest
                                     g_pog_json[p_pog_index].ModuleInfo[g_module_index].ShelfInfo[g_shelf_index].ChestEdit = "Y";
                                 }
                                 render(p_pog_index);
@@ -10578,7 +7890,6 @@ async function doMouseUp(p_x, p_y, p_event, p_prevX, p_prevY, p_canvas, p_camera
                                     var return_val = await get_images(i, j, items_arr, item_index_arr, parseFloat($v("P193_POGCR_IMG_MAX_WIDTH")), parseFloat($v("P193_POGCR_IMG_MAX_HEIGHT")), parseFloat($v("P193_IMAGE_COMPRESS_RATIO")));
                                 }
 
-                                //delete the carpark shelf if all items are moved.
                                 if (g_pog_json[p_pog_index].ModuleInfo[g_module_index].Carpark[0].ItemInfo.length == 0) {
                                     var selectObjects = g_scene_objects[p_pog_index].scene.children[2].getObjectById(g_pog_json[p_pog_index].ModuleInfo[g_module_index].Carpark[0].SObjID);
                                     g_scene_objects[p_pog_index].scene.children[2].remove(selectObjects);
@@ -10649,7 +7960,7 @@ async function doMouseUp(p_x, p_y, p_event, p_prevX, p_prevY, p_canvas, p_camera
                 //---------------------CAMERA SETTING BASED ON NEW OVERALL HEIGHT AND WIDTH OF ALL MODULES   -----------------------------------------------
 
                 if (g_shelf_edit_flag == "Y") {
-                    if (g_manual_zoom_ind == "N"  && !isClickWithoutDrag) { // here this  check the  isclicking 
+                    if (g_manual_zoom_ind == "N" && !isClickWithoutDrag) {
                         var details = get_min_max_xy(p_pog_index);
                         var details_arr = details.split("###");
                         set_camera_z(p_camera, parseFloat(details_arr[2]), parseFloat(details_arr[3]), parseFloat(details_arr[0]), parseFloat(details_arr[1]), g_offset_z, parseFloat(details_arr[4]), parseFloat(details_arr[5]), false, p_pog_index);
@@ -10688,10 +7999,6 @@ async function doMouseUp(p_x, p_y, p_event, p_prevX, p_prevY, p_canvas, p_camera
             }
         }
 
-        // if (g_itemSubLabelInd == "Y") { //ASA-1417   //ASA-1577
-        //     showItemSubLabel(g_itemSubLabel, g_itemSubLabelInd, $v("P193_POGCR_ITEM_NUM_LBL_COLOR"), $v("P193_POGCR_ITEM_NUM_LABEL_POS"), p_pog_index);
-        // }
-
         g_drag_inprogress = "N";
         g_duplicating = "N";
         g_canvas_drag = "N";
@@ -10710,373 +8017,9 @@ async function doMouseUp(p_x, p_y, p_event, p_prevX, p_prevY, p_canvas, p_camera
     }
 }
 
-
-
-
-// function doMouseMove(p_x, p_y, p_event, p_prevX, p_prevY, p_canvas, p_pogjson_opp, p_jselector, p_pog_index) {
-//      if (Array.isArray(g_scene_objects) && g_scene_objects.length > 0) {
-//     /* This is mouse move listner function
-//     This function handles
-//     1. dragging of any object set object current position
-//     2. resetting size of multiselect box
-//     3. grab and move scene which manually zoom is done
-//     4. setting items position for multiselect object dragging
-//     5. when not dragging show item info in bottom of screen.
-//      */
-//     try {
-//         //get the intersect object and from that get the current x y position
-//         var width = p_canvas.width / window.devicePixelRatio;
-//         var height = p_canvas.height / window.devicePixelRatio;
-//         var a = (2 * p_x) / width - 1;
-//         var b = 1 - (2 * p_y) / height;
-//         var yaxis = p_y;
-//         // var padding = parseFloat($("#ig_mod_details").css("padding-left").replace("px", "")) * devicePixelRatio;
-//         var mod_region = document.getElementById("ig_mod_details");
-//         // var mod_detail_width = mod_region.offsetWidth + 40;
-//          var padding = 0;
-//         var mod_detail_width = 0;
-//         if (mod_region) {
-//             var pl = $("#ig_mod_details").css("padding-left");
-//             padding = parseFloat((pl || "0px").replace("px", "")) * devicePixelRatio;
-//             try {
-//                 mod_detail_width = mod_region.offsetWidth + 40;
-//             } catch (e) {
-//                 mod_detail_width = 0;
-//             }
-//         }
-//         var scroll_top = $(document).scrollTop();
-//         var scroll_left = $(".t-Region-body").scrollLeft();
-
-
-//             g_scene_objects[0].scene.children[0].updateProjectionMatrix();
-//             g_raycaster.setFromCamera(
-//                 new THREE.Vector2(a, b),
-//                 g_scene_objects[0].scene.children[0]
-//             );
-
-//             if (typeof g_scene_objects[p_pog_index] !== 'undefined') {
-//                 g_intersects = g_raycaster.intersectObjects(
-//                     g_scene_objects[p_pog_index].scene.children[2].children
-//                 );
-//             } else {
-//                 g_intersects = g_raycaster.intersectObjects(g_world.children);
-//             }
-
-
-//         // g_scene_objects[0].scene.children[0].updateProjectionMatrix();
-//         // g_raycaster.setFromCamera(new THREE.Vector2(a, b), g_scene_objects[0].scene.children[0]);
-//         // if (typeof g_scene_objects[p_pog_index] !== 'undefined') {
-//         //     g_intersects = g_raycaster.intersectObjects(g_scene_objects[p_pog_index].scene.children[2].children); // no need for recusion since all objects are top-level
-//         // } else {
-//         //     g_intersects = g_raycaster.intersectObjects(g_world.children);
-//         // }
-
-//         /* if dragging is in progress set new positions
-//         if ctrl key is pressed while mouse move it means user wants to
-//         create a duplicate of a fixel so do not set new position.
-//          */
-
-//         //if intersected object is item then get details and show in bottom of screen.
-//         var $doc = $(document),
-//             $win = $(window),
-//             $this = $("#object_info"),
-//             offset = $this.offset(),
-//             dTop = offset.top - $doc.scrollTop(),
-//             dBottom = $win.height() - dTop - $this.height(),
-//             dLeft = offset.left - $doc.scrollLeft(),
-//             dRight = $win.width() - dLeft - $this.width();
-
-//         g_mouse.x = p_event.clientX + scroll_left - mod_detail_width;
-//         g_mouse.y = p_event.clientY + scroll_top;
-
-//         var x1 = g_startMouse.x;
-//         var x2 = g_mouse.x;
-//         var y1 = g_startMouse.y;
-//         var y2 = g_mouse.y;
-
-//         if (x1 > x2) {
-//             var tmp1 = x1;
-//             x1 = x2;
-//             x2 = tmp1;
-//         }
-
-//         if (y1 > y2) {
-//             var tmp2 = y1;
-//             y1 = y2;
-//             y2 = tmp2;
-//         }
-//         if (g_dragging) {
-//             g_raycaster.setFromCamera(new THREE.Vector2(a, b), g_scene_objects[0].scene.children[0]);
-//             g_intersects = g_raycaster.intersectObject(g_targetForDragging);
-
-//             var z = g_drag_z;
-//             var locationX = g_intersects[0].point.x;
-//             var locationY = g_intersects[0].point.y;
-//             var locationZ = g_intersects[0].point.z;
-
-//             var coords = new THREE.Vector3(locationX, locationY, locationZ);
-//             g_scene_objects[p_pog_index].scene.children[2].worldToLocal(coords);
-
-//             a = Math.min(19, Math.max(-19, coords.x));
-//             p_y = Math.min(19, Math.max(-19, coords.y));
-//             //multi select box height width and location setting.
-//             if (g_selecting) {
-//                 g_multiselect = "Y";
-//                 g_DragMouseEnd.x = a;
-//                 g_DragMouseEnd.y = p_y;
-
-//                 g_selection.style.left = x1 + "px";
-//                 g_selection.style.top = y1 + "px";
-//                 g_selection.style.width = x2 - x1 - 5 + "px";
-//                 g_selection.style.height = y2 - y1 - 5 + "px";
-//                 console.log('g_selection.style.left', g_selection.style.left, g_selection.style.top, g_selection.style.width);
-//             }
-//             g_DragMouseEnd.x = a;
-//             g_DragMouseEnd.y = p_y;
-//         } else {
-//             if (g_selecting) {
-//                 g_selecting = false;
-//                 g_selection.style.visibility = "hidden";
-//             }
-//         }
-
-//         var contextElement = document.getElementById("object_info");
-//         $("#object_info")
-//             .contents()
-//             .filter(function () {
-//                 return this.nodeType == 3;
-//             })
-//             .remove();
-//         var append_detail = "";
-//         var valid_width = 0;
-//         var lines_arry = [];
-//         var divider = " | ";
-//         console.log("inside", g_intersects.length);
-//         if (g_intersects.length > 0 && typeof g_intersects[0].object.ItemID !== "undefined" && g_intersects[0].object.ItemID !== "" && g_intersects[0].object.ItemID !== "DIVIDER") {
-//             var desc_list_arr = $v("P193_POGCR_ITEM_DESC_LIST").split(":");//ASA-1407 Task 1
-//             for (i = 0; i < desc_list_arr.length; i++) {
-//                 var line_width = 0;
-//                 var divider = i > 0 ? " | " : "";
-//                 if (desc_list_arr[i] == "ITEM") {
-//                     append_detail = append_detail + divider + get_message("ITEM_ID_LBL") + ': <span style="color:yellow">' + g_intersects[0].object.ItemID + "</span>";
-//                     line_width = (" | " + get_message("ITEM_ID_LBL") + ": " + g_intersects[0].object.ItemID).visualLength("ruler");
-//                      console.log("inside IF", g_intersects.length);
-//                 }
-//                 if (desc_list_arr[i] == "UPC") {
-//                     append_detail = append_detail + divider + get_message("POGCR_REP_TEMP_HEAD_BARCODE") + ': <span style="color:yellow">' + g_intersects[0].object.Barcode + "</span>";
-//                     line_width = (" | " + get_message("POGCR_REP_TEMP_HEAD_BARCODE") + ": " + g_intersects[0].object.Barcode).visualLength("ruler");
-//                 }
-//                 if (desc_list_arr[i] == "DESC") {
-//                     append_detail = append_detail + divider + get_message("DESCRIPTION_DETAIL") + ': <span style="color:yellow">' + g_intersects[0].object.Description + "</span>";
-//                     line_width = (" | " + get_message("DESCRIPTION_DETAIL") + ": " + g_intersects[0].object.Description).visualLength("ruler");
-//                 }
-//                 if (desc_list_arr[i] == "BRAND") {
-//                     append_detail = append_detail + divider + get_message("POGCR_BRAND") + ': <span style="color:yellow">' + g_intersects[0].object.Brand + "</span>";
-//                     line_width = (" | " + get_message("POGCR_BRAND") + ": " + g_intersects[0].object.Brand).visualLength("ruler");
-//                 }
-//                 if (desc_list_arr[i] == "GROUP") {
-//                     append_detail = append_detail + divider + get_message("POGCR_GROUP_LBL") + ': <span style="color:yellow">' + g_intersects[0].object.Group + "</span>";
-//                     line_width = (" | " + get_message("POGCR_GROUP_LBL") + ": " + g_intersects[0].object.Group).visualLength("ruler");
-//                 }
-//                 if (desc_list_arr[i] == "DEPT") {
-//                     append_detail = append_detail + divider + get_message("POGCR_TEMP_HEAD_DEPARTMENT") + ': <span style="color:yellow">' + g_intersects[0].object.Dept + "</span>";
-//                     line_width = (" | " + get_message("POGCR_TEMP_HEAD_DEPARTMENT") + ": " + g_intersects[0].object.Dept).visualLength("ruler");
-//                 }
-//                 if (desc_list_arr[i] == "CLASS") {
-//                     append_detail = append_detail + divider + get_message("POGCR_CLASS_LBL") + ': <span style="color:yellow">' + g_intersects[0].object.Class + "</span>";
-//                     line_width = (" | " + get_message("POGCR_CLASS_LBL") + ": " + g_intersects[0].object.Class).visualLength("ruler");
-//                 }
-//                 if (desc_list_arr[i] == "SUBCLASS") {
-//                     append_detail = append_detail + divider + get_message("POGCR_SUBCLASS_LBL") + ': <span style="color:yellow">' + g_intersects[0].object.SubClass + "</span>";
-//                     line_width = (" | " + get_message("POGCR_SUBCLASS_LBL") + ": " + g_intersects[0].object.SubClass).visualLength("ruler");
-//                 }
-//                 if (desc_list_arr[i] == "ITEM_SIZE") {
-//                     append_detail = append_detail + divider + get_message("POGCR_ITEMSIZE_LBL") + ': <span style="color:yellow">' + g_intersects[0].object.SizeDesc + "</span>";
-//                     line_width = (" | " + get_message("POGCR_ITEMSIZE_LBL") + ": " + g_intersects[0].object.SizeDesc).visualLength("ruler");
-//                 }
-//                 if (desc_list_arr[i] == "SUPPLIER") {
-//                     append_detail = append_detail + divider + get_message("POGCR_REP_HEAD_SUPPLIERS") + ': <span style="color:yellow">' + g_intersects[0].object.Supplier + "</span>";
-//                     line_width = (" | " + get_message("POGCR_REP_HEAD_SUPPLIERS") + ": " + g_intersects[0].object.Supplier).visualLength("ruler");
-//                 }
-//                 if (desc_list_arr[i] == "WIDTH") {
-//                     append_detail = append_detail + divider + get_message("POGCR_WIDTH_LBL") + ': <span style="color:yellow">' + (g_intersects[0].object.OW * 100).toFixed(2) + "</span>";
-//                     line_width = (" | " + get_message("POGCR_WIDTH_LBL") + ": " + (g_intersects[0].object.OW * 100).toFixed(2)).visualLength("ruler");
-//                 }
-//                 if (desc_list_arr[i] == "HEIGHT") {
-//                     append_detail = append_detail + divider + get_message("POGCR_HEIGHT_LBL") + ': <span style="color:yellow">' + (g_intersects[0].object.OH * 100).toFixed(2) + "</span>";
-//                     line_width = (" | " + get_message("POGCR_HEIGHT_LBL") + ": " + (g_intersects[0].object.OH * 100).toFixed(2)).visualLength("ruler");
-//                 }
-//                 if (desc_list_arr[i] == "DEPTH") {
-//                     append_detail = append_detail + divider + get_message("POGCR_DEPTH_LBL") + ': <span style="color:yellow">' + (g_intersects[0].object.OD * 100).toFixed(2) + "</span>";
-//                     line_width = (" | " + get_message("POGCR_DEPTH_LBL") + ": " + (g_intersects[0].object.OD * 100).toFixed(2)).visualLength("ruler");
-//                 }
-//                 if (desc_list_arr[i] == "STORE") {
-//                     append_detail = append_detail + divider + get_message("POGCR_STORE_LBL") + ': <span style="color:yellow">' + g_intersects[0].object.StoreCnt + "</span>";
-//                     line_width = (" | " + get_message("POGCR_STORE_LBL") + ": " + g_intersects[0].object.StoreCnt).visualLength("ruler");
-//                 }
-//                 if (desc_list_arr[i] == "ITEM_DIM") {
-//                     append_detail = append_detail + divider + get_message("POGCR_ITEM_DIM_LBL") + ': <span style="color:yellow">' + g_intersects[0].object.ItemDim + "</span>";
-//                     line_width = (" | " + get_message("POGCR_ITEM_DIM_LBL") + ": " + g_intersects[0].object.ItemDim).visualLength("ruler");
-//                 }
-//                 if (desc_list_arr[i] == "POSITION") {
-//                     append_detail = append_detail + divider + get_message("POGCR_POSITION_LBL") + ': <span style="color:yellow">' + g_intersects[0].object.LocID + "</span>";
-//                     line_width = (" | " + get_message("POGCR_POSITION_LBL") + ": " + g_intersects[0].object.LocID).visualLength("ruler");
-//                 }
-//                 if (desc_list_arr[i] == "SHELF") {
-//                     append_detail = append_detail + divider + get_message("POGCR_SHELF_LBL") + ': <span style="color:yellow">' + g_intersects[0].object.Shelf + "</span>";
-//                     line_width = (" | " + get_message("POGCR_SHELF_LBL") + ": " + g_intersects[0].object.Shelf).visualLength("ruler");
-//                 }
-//                 if (desc_list_arr[i] == "ORIENTATION") {
-//                     append_detail = append_detail + divider + get_message("POGCR_ORIENTATION_LBL") + ': <span style="color:yellow">' + g_intersects[0].object.OrientationDesc + "</span>";
-//                     line_width = (" | " + get_message("POGCR_ORIENTATION_LBL") + ": " + g_intersects[0].object.OrientationDesc).visualLength("ruler");
-//                 }
-//                 if (desc_list_arr[i] == "DEPTH_FACING") {
-//                     append_detail = append_detail + divider + get_message("POGCR_DEPTH_FACING_LBL") + ': <span style="color:yellow">' + g_intersects[0].object.DFacing + "</span>";
-//                     line_width = (" | " + get_message("POGCR_DEPTH_FACING_LBL") + ": " + g_intersects[0].object.DFacing).visualLength("ruler");
-//                 }
-//                 if (desc_list_arr[i] == "HORIZ_FACING") {
-//                     append_detail = append_detail + divider + get_message("TEMP_HEAD_HORIZ_FACING") + ': <span style="color:yellow">' + g_intersects[0].object.HorizFacing + "</span>";
-//                     line_width = (" | " + get_message("TEMP_HEAD_HORIZ_FACING") + ": " + g_intersects[0].object.HorizFacing).visualLength("ruler");
-//                 }
-//                 if (desc_list_arr[i] == "VERT_FACING") {
-//                     append_detail = append_detail + divider + get_message("TEMP_HEAD_VERT_FACING") + ': <span style="color:yellow">' + g_intersects[0].object.VertFacing + "</span>";
-//                     line_width = (" | " + get_message("TEMP_HEAD_VERT_FACING") + ": " + g_intersects[0].object.VertFacing).visualLength("ruler");
-//                 }
-//                 if (desc_list_arr[i] == "SELLING_PRICE") {
-//                     append_detail = append_detail + divider + get_message("SELLING_PRICE_LBL") + ': <span style="color:yellow">' + parseFloat(g_intersects[0].object.SellingPrice).toFixed(2) + "</span>";
-//                     line_width = (" | " + get_message("SELLING_PRICE_LBL") + ": " + g_intersects[0].object.SellingPrice).visualLength("ruler");
-//                 }
-//                 if (desc_list_arr[i] == "SALES_UNIT") {
-//                     append_detail = append_detail + divider + get_message("SALES_UNIT_LBL") + ': <span style="color:yellow">' + parseFloat(g_intersects[0].object.SalesUnit).toFixed(2) + "</span>";
-//                     line_width = (" | " + get_message("SALES_UNIT_LBL") + ": " + g_intersects[0].object.SalesUnit).visualLength("ruler");
-//                 }
-//                 if (desc_list_arr[i] == "NET_SALES") {
-//                     append_detail = append_detail + divider + get_message("NET_SALES_LBL") + ': <span style="color:yellow">' + parseFloat(g_intersects[0].object.NetSales).toFixed(2) + "</span>";
-//                     line_width = (" | " + get_message("NET_SALES_LBL") + ": " + g_intersects[0].object.NetSales).visualLength("ruler");
-//                 }
-//                 if (desc_list_arr[i] == "PROFIT") {
-//                     append_detail = append_detail + divider + get_message("PROFIT_LBL") + ': <span style="color:yellow">' + parseFloat(g_intersects[0].object.Profit).toFixed(2) + "</span>";
-//                     line_width = (" | " + get_message("PROFIT_LBL") + ": " + g_intersects[0].object.Profit).visualLength("ruler");
-//                 }
-//                 if (desc_list_arr[i] == "TOTAL_MARGIN") {
-//                     append_detail = append_detail + divider + get_message("POGCR_TOTAL_MARGIN") + ': <span style="color:yellow">' + parseFloat(g_intersects[0].object.TotalMargin).toFixed(2) + "</span>";
-//                     line_width = (" | " + get_message("POGCR_TOTAL_MARGIN") + ": " + g_intersects[0].object.TotalMargin).visualLength("ruler");
-//                 }
-//                 if (desc_list_arr[i] == "COGS_ADJ") {
-//                     append_detail = append_detail + divider + get_message("COGS_ADJ") + ': <span style="color:yellow">' + parseFloat(nvl(g_intersects[0].object.CogsAdj)).toFixed(2) + "</span>";
-//                     line_width = (" | " + get_message("COGS_ADJ") + ": " + nvl(g_intersects[0].object.CogsAdj)).visualLength("ruler");
-//                 }
-
-//                 if (desc_list_arr[i] == "GP") {
-//                     append_detail = append_detail + divider + get_message("GROSS_PROFIT") + ': <span style="color:yellow">' + parseFloat(nvl(g_intersects[0].object.GrossProfit)).toFixed(2) + "</span>";
-//                     line_width = (" | " + get_message("GROSS_PROFIT") + ": " + nvl(g_intersects[0].object.GrossProfit)).visualLength("ruler");
-//                 }
-//                 if (desc_list_arr[i] == "WK_COUNT") {
-//                     append_detail = append_detail + divider + get_message("WEEKS_COUNT") + ': <span style="color:yellow">' + parseFloat(nvl(g_intersects[0].object.WeeksCount)).toFixed(2) + "</span>";
-//                     line_width = (" | " + get_message("WEEKS_COUNT") + ": " + nvl(g_intersects[0].object.WeeksCount)).visualLength("ruler");
-//                 }
-//                 if (desc_list_arr[i] == "REG_MOV") {
-//                     append_detail = append_detail + divider + get_message("REG_MOV") + ': <span style="color:yellow">' + parseFloat(nvl(g_intersects[0].object.RegMovement)).toFixed(2) + "</span>";
-//                     line_width = (" | " + get_message("REG_MOV") + ": " + nvl(g_intersects[0].object.RegMovement)).visualLength("ruler");
-//                 }
-//                 if (desc_list_arr[i] == "AVG_SALES") {
-//                     append_detail = append_detail + divider + get_message("AVG_SALES") + ': <span style="color:yellow">' + parseFloat(nvl(g_intersects[0].object.AvgSales)).toFixed(2) + "</span>";
-//                     line_width = (" | " + get_message("AVG_SALES") + ": " + nvl(g_intersects[0].object.AvgSales)).visualLength("ruler");
-//                 }
-//                 if (desc_list_arr[i] == "DESC_SECOND") {
-//                     append_detail = append_detail + divider + get_message("DESC_SECOND_LBL") + ': <span style="color:yellow">' + g_intersects[0].object.DescSecond + "</span>";
-//                     line_width = (" | " + get_message("DESC_SECOND_LBL") + ": " + g_intersects[0].object.DescSecond).visualLength("ruler");
-//                 }
-//                 if (desc_list_arr[i] == "ITEM_STATUS") {
-//                     append_detail = append_detail + divider + get_message("ITEM_STATUS") + ': <span style="color:yellow">' + g_intersects[0].object.ItemStatus + "</span>";
-//                     line_width = (" | " + get_message("ITEM_STATUS") + ": " + total_unit).visualLength("ruler");
-//                 }
-
-//                 if (desc_list_arr[i] == "TOTAL_UNIT") {
-//                     var total_unit = g_intersects[0].object.HorizFacing * g_intersects[0].object.VertFacing * g_intersects[0].object.DFacing;
-//                     append_detail = append_detail + divider + get_message("TOTAL_UNIT") + ': <span style="color:yellow">' + total_unit + "</span>";
-//                     line_width = (" | " + get_message("TOTAL_UNIT") + ": " + total_unit).visualLength("ruler");
-//                 }
-//                 valid_width = valid_width + line_width;
-//                 if (valid_width > 1300) {
-//                     append_detail = append_detail + "<br>";
-//                     lines_arry.push(valid_width);
-//                     valid_width = 0;
-//                 }
-//             }
-//         } else if (g_intersects.length > 0 && typeof g_intersects[0].object.FixelID !== "undefined" && g_intersects[0].object.FixelID !== "" && typeof p_pogjson_opp[p_pog_index] !== "undefined") {
-//             var pog_version = typeof p_pogjson_opp[p_pog_index].Version !== "undefined" && p_pogjson_opp[p_pog_index].Version !== null ? p_pogjson_opp[p_pog_index].Version : "";
-//             if (sessionStorage.getItem("new_pog_ind") == "Y") {
-//                 var draft_version = divider + get_message("POGCR_DRAFT_VERSION") + ': <span style="color:yellow">' + sessionStorage.getItem("P193_EXISTING_DRAFT_VER") + " </span> ";
-//                 var pogversion = "";
-//             } else {
-//                 var draft_version = "";
-//                 var pogversion = divider + get_message("POGCR_POG_VERSION") + ': <span style="color:yellow">' + pog_version + " </span> ";
-//             }
-//             if (typeof g_intersects[0].object.AvlSpace !== "undefined") {
-//                 append_detail = append_detail + get_message("POGCR_POG_CODE") + ': <span style="color:yellow">' + p_pogjson_opp[p_pog_index].POGCode + " </span> " + pogversion + draft_version + divider + get_message("POGCR_POG_MOD") + ': <span style="color:yellow">' + g_intersects[p_pog_index].object.Module + " </span> " + divider + get_message("POGCR_FIXEL_ID") + ': <span style="color:yellow">' + g_intersects[p_pog_index].object.FixelID + " </span> " + divider + get_message("POGC_FIXEL_SPACE") + ': <span style="color:yellow">' + g_intersects[0].object.AvlSpace + "</span>";
-//             } else {
-//                 append_detail = append_detail + get_message("POGCR_POG_CODE") + ': <span style="color:yellow">' + p_pogjson_opp[p_pog_index].POGCode + " </span> " + pogversion + draft_version + divider + get_message("POGCR_POG_MOD") + ': <span style="color:yellow">' + g_intersects[p_pog_index].object.Module + " </span> " + divider + get_message("POGCR_FIXEL_ID") + ': <span style="color:yellow">' + g_intersects[p_pog_index].object.FixelID + " </span> " + divider + "</span>";
-//             }
-//             contextElement.classList.add("active");
-//         } else if (g_intersects.length > 0 && typeof g_intersects[0].object.Module !== "undefined" && g_intersects[0].object.Module !== "" && typeof p_pogjson_opp[p_pog_index] !== "undefined") {
-//             var pog_version = typeof p_pogjson_opp[p_pog_index].Version !== "undefined" && p_pogjson_opp[p_pog_index].Version !== null ? p_pogjson_opp[p_pog_index].Version : "";
-//             if (sessionStorage.getItem("new_pog_ind") == "Y") {
-//                 var draft_version = divider + get_message("POGCR_DRAFT_VERSION") + ': <span style="color:yellow">' + sessionStorage.getItem("P193_EXISTING_DRAFT_VER") + " </span> ";
-//                 var pogversion = "";
-//             } else {
-//                 var draft_version = "";
-//                 var pogversion = divider + get_message("POGCR_POG_VERSION") + ': <span style="color:yellow">' + pog_version + " </span> ";
-//             }
-//             append_detail = append_detail + get_message("POGCR_POG_CODE") + ': <span style="color:yellow">' + p_pogjson_opp[p_pog_index].POGCode + " </span> " + pogversion + draft_version + divider + get_message("POGCR_POG_MOD") + ': <span style="color:yellow">' + g_intersects[0].object.Module + "</span>";
-//             contextElement.classList.add("active");
-//         } else if (typeof p_pogjson_opp !== "undefined" && p_pogjson_opp.length > 0 && typeof p_pogjson_opp[p_pog_index] !== "undefined") {
-//             var pog_version = typeof p_pogjson_opp[p_pog_index].Version !== "undefined" && p_pogjson_opp[p_pog_index].Version !== null ? p_pogjson_opp[p_pog_index].Version : "";
-//             if (sessionStorage.getItem("new_pog_ind") == "Y") {
-//                 var draft_version = divider + get_message("POGCR_DRAFT_VERSION") + ': <span style="color:yellow">' + sessionStorage.getItem("P193_EXISTING_DRAFT_VER") + " </span> ";
-//                 var pogversion = "";
-//             } else {
-//                 var draft_version = "";
-//                 var pogversion = divider + get_message("POGCR_POG_VERSION") + ': <span style="color:yellow">' + pog_version + " </span> ";
-//             }
-//             append_detail = append_detail + get_message("POGCR_POG_CODE") + ': <span style="color:yellow">' + p_pogjson_opp[p_pog_index].POGCode + " </span> " + pogversion + draft_version;
-//             contextElement.classList.add("active");
-//         } else {
-//             contextElement.classList.remove("active");
-//         }
-
-//         if (g_intersects.length > 0) {
-//             if (typeof g_intersects[0].object.ItemID !== "undefined" && g_intersects[0].object.ItemID !== "" && g_intersects[0].object.ItemID !== "DIVIDER") {
-//                 var height = 36;
-//                 var buffer_width = desc_list_arr.length > 7 ? 150 : 50;
-//                 if (lines_arry.length > 0) {
-//                     var width = Math.max.apply(Math, lines_arry) + buffer_width;
-//                 } else {
-//                     var width = append_detail.visualLength("ruler") + buffer_width;
-//                 }
-//             } else {
-//                 var height = 31;
-//                 var width = append_detail.visualLength("ruler") + 50;
-//             }
-//         } else {
-//             var height = 31;
-//             var width = append_detail.visualLength("ruler") + 50;
-//         }
-
-//         $("#object_info").html(append_detail);
-//         contextElement.style.top = window.innerHeight - $this.height() + "px";
-//         contextElement.style.width = width + "px";
-//         contextElement.style.height = height + 5 + "px";
-//         contextElement.style.fontSize = "large";
-//         contextElement.style.fontFamily = "Tahoma";
-//         contextElement.style.left = 0 + "px";
-//     } catch (err) {
-//         error_handling(err);
-//     }
-//  }  
-// }
 async function doMouseMove(p_x, p_y, p_event, p_prevX, p_prevY, p_canvas, p_camera, p_jselector, p_pog_index) {
     try {
+
         g_present_canvas = parseInt(p_pog_index);
         g_taskItemInContext = true;
         if (p_event.target.nodeName == "CANVAS") {
@@ -11099,29 +8042,207 @@ async function doMouseMove(p_x, p_y, p_event, p_prevX, p_prevY, p_canvas, p_came
             g_raycaster.setFromCamera(new THREE.Vector2(a, b), p_camera);
             g_intersects = g_raycaster.intersectObjects(new_world.children);
 
+            if (g_block_resize_state && g_block_resize_state.armed && !g_block_resize_state.active && g_block_resize_state.blkRef) {
+                try {
+                    var hoverBlkRef = g_block_resize_state.blkRef;
+                    var hoverEdge = null;
+                    if (hoverBlkRef.BlockDim && hoverBlkRef.BlockDim.ColorObj) {
+                        var hoverMesh = hoverBlkRef.BlockDim.ColorObj.getObjectByProperty("uuid", hoverBlkRef.BlkName);
+                        if (hoverMesh) {
+                            var hoverHits = g_raycaster.intersectObject(hoverMesh, true);
+                            if (Array.isArray(hoverHits) && hoverHits.length > 0) {
+                                var hoverPt = hoverHits[0].point.clone();
+                                hoverBlkRef.BlockDim.ColorObj.worldToLocal(hoverPt);
+                                var hoverX = Number(hoverPt.x);
+                                var hoverW = Number(hoverBlkRef.BlockDim.BlkWidth || 0);
+                                var hoverCX = Number(hoverBlkRef.BlockDim.CalcX || 0);
+                                var hoverLeft = hoverCX - hoverW / 2;
+                                var hoverRight = hoverCX + hoverW / 2;
+                                var hoverTol = Math.max(0.06, hoverW * 0.08);
+                                if (Math.abs(hoverX - hoverLeft) <= hoverTol) {
+                                    hoverEdge = "left";
+                                } else if (Math.abs(hoverX - hoverRight) <= hoverTol) {
+                                    hoverEdge = "right";
+                                }
+                            }
+                        }
+                    }
+                    if (hoverEdge) {
+                        canvas_drag.style.cursor = "ew-resize";
+                    } else {
+                        canvas_drag.style.cursor = "auto";
+                    }
+                } catch (e) { }
+            }
+            // If currently performing a block resize drag, update width live
+            if (g_block_resize_state && g_block_resize_state.active && g_block_resize_state.blkRef) {
+                try {
+                    var blkRef = g_block_resize_state.blkRef;
+                    var currPointerLocalX = g_block_resize_state.startPointerLocalX;
+                    if (blkRef.BlockDim && blkRef.BlockDim.ColorObj) {
+                        var activeMesh = blkRef.BlockDim.ColorObj.getObjectByProperty("uuid", blkRef.BlkName);
+                        var hasActiveHit = false;
+                        if (activeMesh) {
+                            var activeHits = g_raycaster.intersectObject(activeMesh, true);
+                            if (Array.isArray(activeHits) && activeHits.length > 0) {
+                                var activePt = activeHits[0].point.clone();
+                                blkRef.BlockDim.ColorObj.worldToLocal(activePt);
+                                currPointerLocalX = Number(activePt.x);
+                                hasActiveHit = true;
+                            }
+                        }
+                        // When pointer goes outside block mesh while dragging edge,
+                        // continue tracking X on the block plane so width can increase.
+                        if (!hasActiveHit) {
+                            var planeLocalZ = Number(blkRef.BlockDim.CalcZ || 0.009);
+                            var planePointWorld = new THREE.Vector3(0, 0, planeLocalZ);
+                            blkRef.BlockDim.ColorObj.localToWorld(planePointWorld);
+                            var normalMatrix = new THREE.Matrix3().getNormalMatrix(blkRef.BlockDim.ColorObj.matrixWorld);
+                            var planeNormalWorld = new THREE.Vector3(0, 0, 1).applyMatrix3(normalMatrix).normalize();
+                            var dragPlane = new THREE.Plane().setFromNormalAndCoplanarPoint(planeNormalWorld, planePointWorld);
+                            var worldPt = new THREE.Vector3();
+                            if (g_raycaster.ray.intersectPlane(dragPlane, worldPt)) {
+                                var planePtLocal = worldPt.clone();
+                                blkRef.BlockDim.ColorObj.worldToLocal(planePtLocal);
+                                currPointerLocalX = Number(planePtLocal.x);
+                            }
+                        }
+                    }
+
+                    var delta = currPointerLocalX - Number(g_block_resize_state.startPointerLocalX || 0);
+                    var minWidth = 0.1;
+                    var newLeft = Number(g_block_resize_state.startLeft || 0);
+                    var newRight = Number(g_block_resize_state.startRight || 0);
+
+                        var currModIndex = Array.isArray(blkRef.mod_index) ? blkRef.mod_index[0] : -1;
+                        var currWidth = Number(blkRef.BlockDim.BlkWidth || 0);
+                        var currCenter = Number(blkRef.BlockDim.CalcX || 0);
+
+                        var currLeft = currCenter - currWidth / 2;
+                        var currRight = currCenter + currWidth / 2;
+                        var moduleLeftLimit = -Infinity;
+                        var moduleRightLimit = Infinity;
+                        var moduleCenterX = 0;
+
+                        if (
+                            currModIndex > -1 &&
+                            g_pog_json[g_pog_index] &&
+                            g_pog_json[g_pog_index].ModuleInfo[currModIndex]
+                        ) {
+                            var module = g_pog_json[g_pog_index].ModuleInfo[currModIndex];
+
+                            moduleCenterX = Number(module.X || 0);
+
+                            var moduleW = Number(module.W || 0);
+
+                            moduleLeftLimit = -moduleW / 2;
+                            moduleRightLimit = moduleW / 2;
+                        }
+                        var leftNeighborLimit = moduleLeftLimit;
+                        var rightNeighborLimit = moduleRightLimit;
+
+                        var blockTop = Number(blkRef.BlockDim.FinalTop || 0);
+                        var blockBottom = Number(blkRef.BlockDim.FinalBtm || 0);
+
+                        for (const otherBlk of g_mod_block_list) {
+
+                            if (!otherBlk || otherBlk === blkRef || !otherBlk.BlockDim)
+                                continue;
+
+                            var otherModIndex = Array.isArray(otherBlk.mod_index) ? otherBlk.mod_index[0] : -1;
+
+                            if (otherModIndex !== currModIndex)
+                                continue;
+
+                            var otherTop = Number(otherBlk.BlockDim.FinalTop || 0);
+                            var otherBottom = Number(otherBlk.BlockDim.FinalBtm || 0);
+                            if (!(otherTop > blockBottom && otherBottom < blockTop))
+                                continue;
+
+                            var otherW = Number(otherBlk.BlockDim.BlkWidth || 0);
+                            var otherCX = Number(otherBlk.BlockDim.CalcX || 0);
+
+                            var otherLeft = otherCX - otherW / 2;
+                            var otherRight = otherCX + otherW / 2;
+                            if (otherRight <= currLeft) {
+                                leftNeighborLimit = Math.max(leftNeighborLimit, otherRight);
+                            }
+                            if (otherLeft >= currRight) {
+                                rightNeighborLimit = Math.min(rightNeighborLimit, otherLeft);
+                            }
+                        }
+                        var newLeft = currLeft;
+                        var newRight = currRight;
+
+                        if (g_block_resize_state.edge === "left") {
+
+                            newLeft = currPointerLocalX;
+
+                        } else {
+
+                            newRight = currPointerLocalX;
+
+                        }
+
+                        newLeft = Math.max(newLeft, leftNeighborLimit);
+                        newLeft = Math.max(newLeft, moduleLeftLimit);
+
+                        newRight = Math.min(newRight, rightNeighborLimit);
+                        newRight = Math.min(newRight, moduleRightLimit);
+
+                        var minWidth = 0.02;
+
+                        if (newRight - newLeft < minWidth) {
+
+                            if (g_block_resize_state.edge === "left") {
+                                newLeft = newRight - minWidth;
+                            } else {
+                                newRight = newLeft + minWidth;
+                            }
+                        }
+
+                        var newWidth = newRight - newLeft;
+                        var newCenter = (newLeft + newRight) / 2;
+
+                        blkRef.BlockDim.BlkWidth = newWidth;
+                        blkRef.BlockDim.CalcX = newCenter;
+                    var l_mod_index = Array.isArray(blkRef.mod_index) && blkRef.mod_index.length > 0 ? blkRef.mod_index[0] : -1;
+                    if (l_mod_index > -1 && typeof g_pog_json[g_pog_index] !== "undefined" && typeof g_pog_json[g_pog_index].ModuleInfo[l_mod_index] !== "undefined") {
+                        var moduleX = Number(g_pog_json[g_pog_index].ModuleInfo[l_mod_index].X || 0);
+                        blkRef.DragMouseStart = blkRef.DragMouseStart || {};
+                        blkRef.DragMouseEnd = blkRef.DragMouseEnd || {};
+                        blkRef.DragMouseStart.x = moduleX + newLeft;
+                        blkRef.DragMouseEnd.x = moduleX + newRight;
+                    }
+                    // call colorAutofillBlock to refresh visuals (update-mode)
+                    var ret = await colorAutofillBlock(null, null, blkRef.mod_index, blkRef.BlkColor || '#FFFFFF', blkRef.BlkName, 'U', blkRef, g_pog_index, 'N');
+                    if (ret) blkRef.BlockDim = Object.assign(blkRef.BlockDim || {}, ret);
+                    render(g_pog_index);
+                    return true;
+                } catch (e) { console.warn('Resize move err', e); }
+            }
             // ─────────────────────────────────────────────────────────────────
             // FIX: Check g_selecting FIRST, before anything else.
             //      If a rubber-band selection is in progress, ONLY update the
             //      selection box and never touch g_dragItem / object positions.
             // ─────────────────────────────────────────────────────────────────
             if (g_selecting) {
-                var header        = document.getElementById("t_Header");
-                var breadcrumb    = document.getElementById("t_Body_title");
-                var top_bar       = document.getElementById("top_bar");
-                var button_cont   = document.getElementById("side_bar");
+                var header = document.getElementById("t_Header");
+                var breadcrumb = document.getElementById("t_Body_title");
+                var top_bar = document.getElementById("top_bar");
+                var button_cont = document.getElementById("side_bar");
                 var devicePixelRatio = window.devicePixelRatio;
-                var scroll_top    = $(document).scrollTop();
-                var scroll_left   = $(".t-Region-body").scrollLeft();
-                var padding       = parseFloat($(".t-Body-contentInner").css("padding-left").replace("px", "")) * devicePixelRatio;
+                var scroll_top = $(document).scrollTop();
+                var scroll_left = $(".t-Region-body").scrollLeft();
+                var padding = parseFloat($(".t-Body-contentInner").css("padding-left").replace("px", "")) * devicePixelRatio;
 
-                var header_height     = header.offsetHeight;
+                var header_height = header.offsetHeight;
                 var breadcrumb_height = breadcrumb.offsetHeight;
-                var top_bar_height    = top_bar.offsetHeight;
-                var btn_cont_width    = button_cont.offsetWidth;
+                var top_bar_height = top_bar.offsetHeight;
+                var btn_cont_width = button_cont.offsetWidth;
 
                 var canvas_rect_mm = p_canvas.getBoundingClientRect();
                 g_mouse.x = p_event.clientX - canvas_rect_mm.left + scroll_left;
-                // g_mouse.y = p_event.clientY + scroll_top  - (breadcrumb_height + padding + header_height + top_bar_height);
                 g_mouse.y = p_event.clientY - canvas_rect_mm.top + scroll_top;
 
                 var x1 = g_startMouse.x, x2 = g_mouse.x;
@@ -11130,17 +8251,41 @@ async function doMouseMove(p_x, p_y, p_event, p_prevX, p_prevY, p_canvas, p_came
                 if (x1 > x2) { var tmp = x1; x1 = x2; x2 = tmp; }
                 if (y1 > y2) { var tmp = y1; y1 = y2; y2 = tmp; }
 
-                // Update world-space drag end for hit-test on mouseup
-                g_DragMouseEnd.x = Math.min(19, Math.max(-19, a));
-                g_DragMouseEnd.y = Math.min(19, Math.max(-19, p_y));
-
                 // Update the visible rubber-band rectangle
                 g_multiselect = "Y";
-                g_selection.style.left       = x1 + "px";
-                g_selection.style.top        = y1 + "px";
-                g_selection.style.width      = Math.max(0, x2 - x1 - 20) + "px";
-                g_selection.style.height     = Math.max(0, y2 - y1) + "px";
+                g_selection.style.left = x1 + "px";
+                g_selection.style.top = y1 + "px";
+                g_selection.style.width = Math.max(0, x2 - x1 - 20) + "px";
+                g_selection.style.height = Math.max(0, y2 - y1) + "px";
                 g_selection.style.visibility = "visible";
+
+                // ── FIX: Convert screen position to world-space before storing
+                //    g_DragMouseEnd so it matches the world-space g_DragMouseStart
+                //    that was stored in doMouseDown. Previously p_y (raw pixel) and
+                //    a (NDC -1..1) were stored directly, causing end < start even
+                //    when the mouse moved in a positive direction. ───────────────
+                new_world.add(g_targetForDragging);
+                g_targetForDragging.position.set(0, 0, 0);
+                g_raycaster.setFromCamera(new THREE.Vector2(a, b), p_camera);
+                var selIntersects = g_raycaster.intersectObject(g_targetForDragging);
+                new_world.remove(g_targetForDragging);
+
+                if (selIntersects.length > 0) {
+                    var selCoords = new THREE.Vector3(
+                        selIntersects[0].point.x,
+                        selIntersects[0].point.y,
+                        selIntersects[0].point.z
+                    );
+                    new_world.worldToLocal(selCoords);
+                    g_DragMouseEnd.x = Math.min(19, Math.max(-19, selCoords.x));
+                    g_DragMouseEnd.y = Math.min(19, Math.max(-19, selCoords.y));
+                } else {
+                    // Fallback: use NDC values if target plane not hit
+                    // 'b' is the correct NDC y (not raw p_y pixel)
+                    g_DragMouseEnd.x = Math.min(19, Math.max(-19, a));
+                    g_DragMouseEnd.y = Math.min(19, Math.max(-19, b));
+                }
+                // ── END FIX ──────────────────────────────────────────────────
 
                 // Do NOT fall through to any drag logic
                 return;
@@ -11150,6 +8295,10 @@ async function doMouseMove(p_x, p_y, p_event, p_prevX, p_prevY, p_canvas, p_came
             // ─────────────────────────────────────────────────────────────────
 
             console.log("MouseMove", g_dragging);
+            if (p_event.button === 2) {
+                console.log("it working")
+                g_dragging = false;
+            }
             if (g_dragging && g_duplicating == "N") {
                 g_pog_index = p_pog_index;
                 p_canvas = canvas_drag;
@@ -11678,7 +8827,7 @@ function doMouseDoubleclick(p_x, p_y, p_startX, p_startY, p_event, p_canvas, p_c
         }
         g_dblclick_opened = "Y";
         try {
-            open_edit_modal_popup(g_object_hit_ind, g_module_index, g_shelf_index, "N", p_pog_index);
+            open_blk_details(g_selected_block, 'Y');
         } catch (err) {
             error_handling(err);
         }
@@ -11686,398 +8835,8 @@ function doMouseDoubleclick(p_x, p_y, p_startX, p_startY, p_event, p_canvas, p_c
     logDebug("function : doMouseDoubleclick", "E");
 }
 
-//Moved to Common JS
-// function get_object_identity(p_pog_index, p_multiSelect, p_multiCopydone, p_a, p_y) {
-//     logDebug("function : get_object_identity", "S");
-//     try {
-//         //checking which object has been clicked for drag or delete.
-//         var i = 0;
-//         for (const modules of g_pog_json[p_pog_index].ModuleInfo) {
-//             if (g_carpark_edit_flag == "Y") {
-//                 break; //return false;
-//             }
-//             if (modules.ParentModule == null && typeof modules.Carpark !== "undefined" && modules.Carpark.length > 0) {
-//                 if (modules.Carpark[0].ItemInfo.length > 0) {
-//                     var j = 0;
-//                     for (const carparks of modules.Carpark) {
-//                         if (carparks.SObjID == g_objectHit_id) {
-//                             g_module_index = i;
-//                             g_shelf_index = j;
-//                             g_carpark_edit_flag = "Y";
-//                             break; //return false;
-//                         } else {
-//                             g_carpark_edit_flag = "N";
-//                         }
-//                         j++;
-//                     }
-//                 }
-//             }
-//             i++;
-//         }
-//         if (g_carpark_edit_flag == "N") {
-//             var i = 0;
-//             for (const modules of g_pog_json[p_pog_index].ModuleInfo) {
-//                 if (g_taskItemInContext || g_compare_view == "POG" || g_compare_view == "EDIT_PALLET") {
-//                     //ASA-1085
-//                     if (modules.MObjID == g_objectHit_id && modules.ParentModule == null) {
-//                         g_module_index = i;
-//                         g_module_cnt = i;
-//                         g_module_width = modules.W;
-//                         g_module_X = modules.X;
-//                         g_module_edit_flag = "Y";
-//                         comp_obj_id = modules.CompMObjID;
-//                         g_wireframe_id = modules.WFrameID;
-//                         apex.item("P193_MODULE_DISP").setValue(modules.Module);
-//                         break; //return false;
-//                     } else {
-//                         g_module_edit_flag = "N";
-//                     }
-//                 } else {
-//                     if (modules.CompMObjID == g_objectHit_id && modules.ParentModule == null) {
-//                         g_module_index = i;
-//                         g_module_cnt = i;
-//                         g_module_width = modules.W;
-//                         g_module_X = modules.X;
-//                         g_module_edit_flag = "Y";
-//                         comp_obj_id = modules.MObjID;
-//                         g_wireframe_id = modules.WFrameID;
-//                         apex.item("P193_MODULE_DISP").setValue(modules.Module);
-//                         break; //return false;
-//                     } else {
-//                         g_module_edit_flag = "N";
-//                     }
-//                 }
-//                 i++;
-//             }
-//         }
-
-//         if (g_module_edit_flag == "N" && g_carpark_edit_flag == "N") {
-//             var j = 0;
-//             for (const Modules of g_pog_json[p_pog_index].ModuleInfo) {
-//                 if (g_shelf_edit_flag == "Y") {
-//                     break; //return false;
-//                 }
-//                 if (Modules.ParentModule == null) {
-//                     $.each(Modules.ShelfInfo, function (i, Shelf) {
-//                         if (Shelf.ObjType !== "BASE" && Shelf.ObjType !== "NOTCH" && Shelf.ObjType !== "DIVIDER") {
-//                             if (g_taskItemInContext || g_compare_view == "POG" || g_compare_view == "EDIT_PALLET") {
-//                                 //ASA-1085
-//                                 if (Shelf.SObjID == g_objectHit_id) {
-//                                     g_module_index = j;
-//                                     g_shelf_index = i;
-//                                     g_shelf_max_merch = Shelf.MaxMerch;
-//                                     g_shelf_basket_spread = Shelf.BsktSpreadProduct;
-//                                     g_shelf_edit_flag = "Y";
-//                                     g_wireframe_id = Shelf.WFrameID;
-//                                     g_shelf_object_type = Shelf.ObjType;
-//                                     comp_obj_id = Shelf.CompShelfObjID;
-//                                     g_rotation = Shelf.Rotation;
-//                                     if (Shelf.Slope > 0) {
-//                                         g_slope = 0 - Shelf.Slope;
-//                                     } else if (Shelf.Slope < 0) {
-//                                         g_slope = -Shelf.Slope;
-//                                     } else {
-//                                         g_slope = 0;
-//                                     }
-//                                     return false;
-//                                 } else {
-//                                     g_shelf_edit_flag = "N";
-//                                 }
-//                             } else {
-//                                 if (Shelf.CompShelfObjID == g_objectHit_id) {
-//                                     g_module_index = j;
-//                                     g_shelf_index = i;
-//                                     g_shelf_max_merch = Shelf.MaxMerch;
-//                                     g_shelf_edit_flag = "Y";
-//                                     g_wireframe_id = Shelf.WFrameID;
-//                                     g_shelf_object_type = Shelf.ObjType;
-//                                     g_shelf_basket_spread = Shelf.BsktSpreadProduct;
-//                                     g_rotation = Shelf.Rotation;
-//                                     comp_obj_id = Shelf.SObjID;
-//                                     if (Shelf.Slope > 0) {
-//                                         g_slope = 0 - Shelf.Slope;
-//                                     } else if (Shelf.Slope < 0) {
-//                                         g_slope = -Shelf.Slope;
-//                                     } else {
-//                                         g_slope = 0;
-//                                     }
-//                                     return false;
-//                                 } else {
-//                                     g_shelf_edit_flag = "N";
-//                                 }
-//                             }
-//                         }
-//                     });
-//                 }
-//                 j++;
-//             }
-//         }
-//         if (g_shelf_edit_flag == "N" && g_module_edit_flag == "N" && g_carpark_edit_flag == "N") {
-//             var k = 0;
-//             for (const Modules of g_pog_json[p_pog_index].ModuleInfo) {
-//                 if (g_item_edit_flag == "Y") {
-//                     break; //return false;
-//                 }
-//                 if (Modules.ParentModule == null) {
-//                     if (typeof Modules.Carpark !== "undefined" && typeof Modules.Carpark[0] !== "undefined" && Modules.Carpark.length > 0) {
-//                         if (Modules.Carpark[0].ItemInfo.length > 0) {
-//                             var j = 0;
-//                             for (const items of Modules.Carpark[0].ItemInfo) {
-//                                 if (g_taskItemInContext || g_compare_view == "POG" || g_compare_view == "EDIT_PALLET") {
-//                                     //ASA-1085
-//                                     if (items.ObjID == g_objectHit_id) {
-//                                         g_module_index = k;
-//                                         g_shelf_index = 0;
-//                                         g_item_index = j;
-//                                         g_item_edit_flag = "Y";
-//                                         g_shelf_object_type = Modules.Carpark[0].ObjType;
-//                                         g_wireframe_id = items.WFrameID;
-//                                         comp_obj_id = items.CompItemObjID;
-//                                         g_carpark_item_flag = "Y";
-//                                         break; //return false;
-//                                     } else {
-//                                         g_item_edit_flag = "N";
-//                                     }
-//                                 } else {
-//                                     if (items.ObjID == g_objectHit_id) {
-//                                         g_module_index = k;
-//                                         g_shelf_index = 0;
-//                                         g_item_index = j;
-//                                         g_item_edit_flag = "Y";
-//                                         g_shelf_object_type = Modules.Carpark[0].ObjType;
-//                                         g_wireframe_id = items.WFrameID;
-//                                         comp_obj_id = items.ObjID;
-//                                         g_carpark_item_flag = "Y";
-//                                         break; //return false;
-//                                     } else {
-//                                         g_item_edit_flag = "N";
-//                                     }
-//                                 }
-//                                 j++;
-//                             }
-//                         }
-//                     }
-//                     var i = 0;
-//                     for (const Shelf of Modules.ShelfInfo) {
-//                         if (Shelf.ObjType !== "BASE" && Shelf.ObjType !== "NOTCH" && Shelf.ObjType !== "DIVIDER" && Shelf.ObjType !== "TEXTBOX") {
-//                             if (g_item_edit_flag == "Y") {
-//                                 break; //return false;
-//                             }
-//                             var j = 0;
-//                             for (const items of Shelf.ItemInfo) {
-//                                 if (g_taskItemInContext || g_compare_view == "POG" || g_compare_view == "EDIT_PALLET" || g_compare_view == "PREV_VERSION") {
-//                                     //ASA-1085
-//                                     if (items.ObjID == g_objectHit_id) {
-//                                         g_module_index = k;
-//                                         g_shelf_index = i;
-//                                         g_item_index = j;
-//                                         g_item_edit_flag = "Y";
-//                                         g_shelf_object_type = Shelf.ObjType;
-//                                         g_wireframe_id = items.WFrameID;
-//                                         comp_obj_id = items.CompItemObjID;
-//                                         break; //return false;
-//                                     } else {
-//                                         g_item_edit_flag = "N";
-//                                     }
-//                                 } else {
-//                                     if (items.CompItemObjID == g_objectHit_id) {
-//                                         g_module_index = k;
-//                                         g_shelf_index = i;
-//                                         g_item_index = j;
-//                                         g_item_edit_flag = "Y";
-//                                         comp_obj_id = items.ObjID;
-//                                         g_shelf_object_type = Shelf.ObjType;
-//                                         g_wireframe_id = items.WFrameID;
-//                                         break; //return false;
-//                                     } else {
-//                                         g_item_edit_flag = "N";
-//                                     }
-//                                 }
-//                                 j++;
-//                             }
-//                         }
-//                         i++;
-//                     }
-//                 }
-//                 k++;
-//             }
-//         }
-//         //Note: we always populate g_delete_details with even single click to maintain the common behaviour.
-//         if (p_multiSelect == "N" && p_multiCopydone == "N") {
-//             // Task 21828
-//             g_delete_details = [];
-//             var Module = g_pog_json[p_pog_index].ModuleInfo[g_module_index];
-//             if (g_shelf_index !== -1 && g_item_index == -1 && g_carpark_item_flag == "N") {
-//                 var Shelf = g_pog_json[p_pog_index].ModuleInfo[g_module_index].ShelfInfo[g_shelf_index];
-//                 var details = {};
-//                 details["ObjID"] = Shelf.SObjID;
-//                 details["MIndex"] = g_module_index;
-//                 details["SIndex"] = g_shelf_index;
-//                 details["ObjWidth"] = Shelf.W;
-//                 details["ObjHeight"] = Shelf.H;
-//                 details["XAxis"] = Shelf.X;
-//                 details["YAxis"] = Shelf.Y;
-//                 details["ZAxis"] = Shelf.Z;
-//                 details["IIndex"] = -1;
-//                 details["ObjType"] = Shelf.ObjType;
-//                 details["IsDivider"] = "N";
-//                 details["Object"] = "SHELF";
-//                 details["MObjID"] = Module.MObjID;
-//                 details["SObjID"] = Shelf.SObjID;
-//                 details["ItemID"] = Shelf.Shelf; //ASA-1471 issue 1
-//                 details["Item"] = "";
-//                 details["Exists"] = "N";
-//                 details["Rotation"] = Shelf.Rotation;
-//                 details["Slope"] = Shelf.Slope;
-//                 details["Distance"] = 0;
-//                 details["TopObjID"] = "";
-//                 details["BottomObjID"] = "";
-//                 details["StartCanvas"] = g_start_canvas;
-//                 details["g_present_canvas"] = g_present_canvas;
-//                 details["p_pog_index"] = p_pog_index;
-//                 //ASA-1471 issue 1 S
-//                 details["W"] = Shelf.W;
-//                 details["H"] = Shelf.H;
-//                 details["D"] = Shelf.D;
-//                 details["AllowAutoCrush"] = Shelf.AllowAutoCrush;
-//                 details["Rotation"] = Shelf.Rotation;
-//                 details["Slope"] = Shelf.Slope;
-//                 details["Color"] = Shelf.Color;
-//                 details["Combine"] = Shelf.Combine;
-//                 details["LOverhang"] = Shelf.LOverhang;
-//                 details["ROverhang"] = Shelf.ROverhang;
-//                 details["DivHeight"] = typeof Shelf.DivHeight == "undefined" ? 0 : Shelf.DivHeight;
-//                 details["DivWidth"] = typeof Shelf.DivWidth == "undefined" ? 0 : Shelf.DivWidth;
-//                 details["DivPst"] = typeof Shelf.DivPst == "undefined" ? "N" : Shelf.DivPst;
-//                 details["DivPed"] = typeof Shelf.DivPed == "undefined" ? "N" : Shelf.DivPed;
-//                 details["DivPbtwFace"] = typeof Shelf.DivPbtwFace == "undefined" ? "N" : Shelf.DivPbtwFace;
-//                 details["NoDivIDShow"] = Shelf.NoDivIDShow;
-//                 details["DivFillCol"] = typeof Shelf.DivFillCol == "undefined" ? "#3D393D" : Shelf.DivFillCol;
-//                 details["SpreadItem"] = Shelf.SpreadItem;
-//                 details["MaxMerch"] = Shelf.MaxMerch;
-//                 //ASA-1471 issue 1 E
-//                 //ASA-1669 Start
-//                 details["FBold"] = Shelf.FBold;
-//                 details["FSize"] = Shelf.FSize;
-//                 details["FStyle"] = Shelf.FStyle;
-//                 details["InputText"] = Shelf.InputText;
-//                 details["TextImg"] = Shelf.TextImg;
-//                 details["TextImgMime"] = Shelf.TextImgMime;
-//                 details["TextImgName"] = Shelf.TextImgName;
-//                 details["ReduceToFit"] = Shelf.ReduceToFit;
-//                 details["TextDirection"] = Shelf.TextDirection;
-//                 details["WrapText"] = Shelf.WrapText;
-//                 //ASA-1669 End
-//                 g_delete_details.multi_delete_shelf_ind = "";
-//                 g_delete_details.push(details);
-//             } else if (g_shelf_index !== -1 && g_item_index !== -1 && g_carpark_item_flag == "N") {
-//                 var Shelf = g_pog_json[p_pog_index].ModuleInfo[g_module_index].ShelfInfo[g_shelf_index];
-//                 var Item = g_pog_json[p_pog_index].ModuleInfo[g_module_index].ShelfInfo[g_shelf_index].ItemInfo[g_item_index];
-//                 var details = {};
-//                 var is_divider = "N";
-//                 var object = "ITEM";
-//                 if (Item.Item == "DIVIDER") {
-//                     is_divider = "Y";
-//                     object = "SHELF";
-//                 }
-//                 details["ObjID"] = Item.ObjID;
-//                 details["MIndex"] = g_module_index;
-//                 details["SIndex"] = g_shelf_index;
-//                 details["ObjWidth"] = Item.W;
-//                 details["ObjHeight"] = Item.H;
-//                 details["XAxis"] = Item.X;
-//                 details["YAxis"] = Item.Y;
-//                 details["ZAxis"] = Item.Z;
-//                 details["IIndex"] = g_item_index;
-//                 details["ObjType"] = Shelf.ObjType;
-//                 details["IsDivider"] = is_divider;
-//                 details["Object"] = object;
-//                 details["MObjID"] = Module.MObjID;
-//                 details["SObjID"] = Shelf.SObjID;
-//                 details["ItemID"] = Item.ItemID;
-//                 details["Item"] = Item.Item;
-//                 details["W"] = Item.W;
-//                 details["H"] = Item.H;
-//                 details["X"] = Item.X;
-//                 details["Y"] = Item.Y;
-//                 details["Exists"] = "N";
-//                 details["Rotation"] = 0;
-//                 details["Slope"] = 0;
-//                 details["Distance"] = Item.Distance;
-//                 details["TopObjID"] = Item.TopObjID;
-//                 details["BottomObjID"] = Item.BottomObjID;
-//                 details["StartCanvas"] = g_start_canvas;
-//                 details["g_present_canvas"] = g_present_canvas;
-//                 details["p_pog_index"] = p_pog_index;
-//                 details["Color"] = Item.Color; //20240806
-//                 //ASA-1471 issue 13 S
-//                 if (Item.Item == "DIVIDER") {
-//                     details["DivHeight"] = typeof Item.DivHeight == "undefined" ? 0 : Item.DivHeight;
-//                     details["DivWidth"] = typeof Item.DivWidth == "undefined" ? 0 : Item.DivWidth;
-//                     details["DivPst"] = typeof Item.DivPst == "undefined" ? "N" : Item.DivPst;
-//                     details["DivPed"] = typeof Item.DivPed == "undefined" ? "N" : Item.DivPed;
-//                     details["DivPbtwFace"] = typeof Item.DivPbtwFace == "undefined" ? "N" : Item.DivPbtwFace;
-//                     details["NoDivIDShow"] = Item.NoDivIDShow;
-//                     details["DivFillCol"] = typeof Item.DivFillCol == "undefined" ? "#3D393D" : Item.DivFillCol;
-//                     details["LOverhang"] = 0;
-//                     details["ROverhang"] = 0;
-//                     details["MaxMerch"] = 0;
-//                 }
-//                 details["D"] = Item.D;
-//                 //ASA-1471 issue 13 E
-//                 g_delete_details.multi_delete_shelf_ind = "";
-//                 g_delete_details.push(details);
-//             } else if (g_shelf_index !== -1 && g_item_index !== -1 && g_carpark_item_flag == "Y") {
-//                 var Carpark = g_pog_json[p_pog_index].ModuleInfo[g_module_index].Carpark;
-//                 var Item = g_pog_json[p_pog_index].ModuleInfo[g_module_index].Carpark[0].ItemInfo[g_item_index];
-//                 var details = {};
-//                 details["ObjID"] = Item.ObjID;
-//                 details["MIndex"] = g_module_index;
-//                 details["SIndex"] = 0;
-//                 details["ObjWidth"] = Item.W;
-//                 details["ObjHeight"] = Item.H;
-//                 details["XAxis"] = Item.X;
-//                 details["YAxis"] = Item.Y;
-//                 details["ZAxis"] = Item.Z;
-//                 details["IIndex"] = g_item_index;
-//                 details["ObjType"] = Carpark.ObjType;
-//                 details["IsDivider"] = "N";
-//                 details["Object"] = "CARPARK_ITEM";
-//                 details["MObjID"] = Module.MObjID;
-//                 details["SObjID"] = Carpark.SObjID;
-//                 details["ItemID"] = Item.ItemID;
-//                 details["Item"] = Item.Item;
-//                 details["W"] = Item.W;
-//                 details["H"] = Item.H;
-//                 details["X"] = Item.X;
-//                 details["Y"] = Item.Y;
-//                 details["Exists"] = "N";
-//                 details["Rotation"] = 0;
-//                 details["Slope"] = 0;
-//                 details["Distance"] = Item.Distance;
-//                 details["TopObjID"] = Item.TopObjID;
-//                 details["BottomObjID"] = Item.BottomObjID;
-//                 details["IsCarpark"] = "Y";
-//                 details["StartCanvas"] = g_start_canvas;
-//                 details["g_present_canvas"] = g_present_canvas;
-//                 details["p_pog_index"] = p_pog_index;
-//                 details["Color"] = Item.Color; //20240806
-//                 g_delete_details.multi_delete_shelf_ind = "";
-//                 g_delete_details.multi_carpark_ind = "Y";
-//                 g_delete_details.push(details);
-//             }
-//             g_delete_details.StartCanvas = g_start_canvas;
-//             g_delete_details.g_present_canvas = g_present_canvas;
-//             update_item_xy_distance("N", p_pog_index, p_a, p_y);
-//         }
-
-//         logDebug("function : get_object_identity", "E");
-//     } catch (err) {
-//         error_handling(err);
-//     }
-// }
-
 async function setDefaultState(p_new_pog_ind) {
+    logDebug("function : setDefaultState", "S");
     g_module_obj_array = [];
     g_peg_holes_active = "Y";
     g_show_peg_tags = "N";
@@ -12106,108 +8865,11 @@ async function setDefaultState(p_new_pog_ind) {
     g_overhung_shelf_active = overHungLabel; //ASA-1138
     g_itemSubLabelInd = "N"; //ASA-1182
     g_itemSubLabel = ""; //ASA-1182
+    logDebug("function : setDefaultState", "E");
 }
 
-
-//Moved to Common JS - WPD page3.js
-// async function switchCanvasView(p_view, p_product_list_check = "N") {
-//     var containerH,
-//         containerW,
-//         renderFlag = "Y",
-//         rowCount,
-//         old_pogIndex = g_pog_index,
-//         colCount;
-//     rowCount = $("[data-row]").length;
-//     colCount = $("[data-col]").length;
-//     if ($(".a-Splitter-thumb").attr("title") == "Collapse") {
-//         p_product_list_check = "Y";
-//     }
-//     // [Task_22091], Start
-//     var drawRegW = $("#drawing_region").width();
-//     var sidebarW = $("#side_bar").width();
-//     containerW = drawRegW - sidebarW;
-//     containerH = $("#canvas-holder .container").height();
-//     $s("P193_POGCR_TILE_VIEW", p_view);
-//     // [Task_22091], End
-//     if (p_view == "H" && (($("#canvas-holder .container").hasClass("v-view") && p_product_list_check == "N") || p_product_list_check == "Y")) {
-//         $("#canvas-holder .container").css("display", "flex").addClass("h-view").removeClass("v-view");
-//         $(".viewH").addClass("view_active");
-//         $(".viewV").removeClass("view_active");
-
-//         for (var i = 1; i <= rowCount; i++) {
-//             var currColCOunt = $("[data-row=" + i + "] [data-col]").length;
-//             $("[data-row=" + i + "] .canvas-content")
-//                 .css("height", parseFloat((containerH / currColCOunt).toFixed(2)))
-//                 .css("width", parseFloat((containerW / rowCount).toFixed(2)));
-//         }
-//     } else if (p_view == "V" && (($("#canvas-holder .container").hasClass("h-view") && p_product_list_check == "N") || p_product_list_check == "Y")) {
-//         $("#canvas-holder .container").css("display", "grid").addClass("v-view").removeClass("h-view");
-//         $(".viewV").addClass("view_active");
-//         $(".viewH").removeClass("view_active");
-
-//         for (var i = 1; i <= rowCount; i++) {
-//             var currColCOunt = $("[data-row=" + i + "] [data-col]").length;
-//             $("[data-row=" + i + "] .canvas-content")
-//                 .css("height", parseFloat((containerH / rowCount).toFixed(2)))
-//                 .css("width", parseFloat((containerW / currColCOunt).toFixed(2)));
-//         }
-//     } else {
-//         renderFlag = "N";
-//     }
-//     if (renderFlag == "Y") {
-//         if (g_pog_json.length > 0) {
-//             //20240708 Regression issue 5
-//             g_canvas_objects = [];
-//             for (var i = 1; i <= g_pog_json.length; i++) {
-//                 const pRenderer = g_renderer; //g_scene_objects[i - 1].renderer;
-//                 const pScene = g_scene_objects[i - 1].scene;
-//                 const pCamera = g_scene_objects[i - 1].scene.children.find((obj) => {
-//                     return obj.type === "PerspectiveCamera";
-//                 });
-//                 var canvasName = "maincanvas" + (i == 1 ? "" : i);
-//                 g_canvas = document.getElementById(canvasName);
-//                 var canvasContainerH = $("#" + canvasName)
-//                     .parent()
-//                     .height();
-//                 var canvasContainerW = $("#" + canvasName)
-//                     .parent()
-//                     .width();
-//                 var canvasBtns = $("#" + canvasName + "-btns")[0];
-//                 var canvasBtns_height = g_scene_objects.length > 1 ? canvasBtns.offsetHeight : 0;
-//                 var canvasWidthOrg = canvasContainerW;
-//                 var canvasHeightOrg = canvasContainerH - canvasBtns_height;
-
-//                 $("#" + canvasName)
-//                     .css("height", canvasHeightOrg + "px !important")
-//                     .css("width", canvasWidthOrg + "px !important");
-//                 $("#" + canvasName).height(canvasHeightOrg); //ASA-1107
-//                 $("#" + canvasName).width(canvasWidthOrg); //ASA-1107
-
-//                 g_canvas.width = canvasWidthOrg;
-//                 g_canvas.height = canvasHeightOrg;
-//                 g_canvas_objects.push($("#" + canvasName)[0]);
-
-//                 var pTanFOV = Math.tan(((Math.PI / 180) * pCamera.fov) / 2);
-//                 pCamera.aspect = canvasWidthOrg / canvasHeightOrg;
-//                 pCamera.fov = (360 / Math.PI) * Math.atan(pTanFOV);
-//                 pCamera.updateProjectionMatrix();
-//                 pRenderer.setSize(canvasWidthOrg, canvasHeightOrg);
-//                 var details = get_min_max_xy(i - 1);
-//                 var details_arr = details.split("###");
-//                 set_camera_z(pCamera, parseFloat(details_arr[2]), parseFloat(details_arr[3]), parseFloat(details_arr[0]), parseFloat(details_arr[1]), g_offset_z, parseFloat(details_arr[4]), parseFloat(details_arr[5]), true, i - 1);
-//                 //pRenderer.render(pScene, pCamera);
-//                 g_pog_index = i - 1;
-//                 g_scene = pScene;
-//                 g_camera = pCamera;
-//                 render(i - 1);
-//             }
-//         } //20240708 Regression issue 5
-//     }
-//     g_pog_index = old_pogIndex;
-// }
-
-
 async function update_item_xy_distance(p_updateObj, p_pog_index, p_newx, p_newy) {
+    logDebug("function : update_item_xy_distance", "S");
     new_details = JSON.parse(JSON.stringify(g_delete_details));
 
     for (const objects of new_details) {
@@ -12305,8 +8967,8 @@ async function update_item_xy_distance(p_updateObj, p_pog_index, p_newx, p_newy)
             }
         }
     }
+    logDebug("function : update_item_xy_distance", "E");
 }
-
 
 async function open_edit_modal_popup(p_object_ind, p_module_ind, p_shelf_ind, p_duplicate_fixel, p_pog_index, p_edit = "N") {
     logDebug("function : open_edit_modal_popup; object_ind : " + p_object_ind + "; module_ind : " + p_module_ind + "; shelf_ind : " + p_shelf_ind + "; duplicate_fixel : " + p_duplicate_fixel, "S");
@@ -12619,14 +9281,12 @@ async function onload_create_pog() {
 
             g_pog_json_data = JSON.parse(JSON.stringify(g_json));
             g_module_obj_array = [];
-            $(".live_image").css("color", "#c7c7c7").removeAttr("onclick").css("cursor", "auto");
-            $(".open_pdf").css("color", "#c7c7c7").removeAttr("onclick").css("cursor", "auto");
             async function doSomething() {
-                if ($v("P193_ERROR_FLAG") == "") {
+                if ($v("P193_ERROR_FLAG") == "Y") {
                     // raise_error("&IMP_FAILURE_ERROR_MSG.");
                     //identify if any change in POG
                     pog_edited_ind = "Y";
-                    // var returnval = await save_pog_to_json(g_pog_json);
+                    var returnval = await save_pog_to_json(g_pog_json);
                     apex.navigation.redirect("f?p=" + $v("pFlowId") + ":" + $v("pFlowStepId") + ":" + $v("pInstance") + ":APPLICATION_PROCESS=DOWNLOAD_ERROR_TMPL");
 
                     if (g_ComViewIndex > -1 && g_compare_pog_flag == "Y" && g_compare_view == "EDIT_PALLET") {
@@ -12706,8 +9366,6 @@ async function onload_create_pog() {
                                     if (POG_JSON.length > 1) {
                                         $("#pog_list_btn").css("display", "block");
                                         $("#chng_view_btn").css("display", "block");
-                                        $(".add_pog").css("display", "block");
-                                        $(".open_par").css("display", "block"); //ASA-1587
                                     }
                                     g_pog_json = [];
                                     for (var p = 0; p <= POG_JSON.length - 1; p++) {
@@ -12739,11 +9397,6 @@ async function onload_create_pog() {
                                             var res = await enableDisableFlags(p);
                                         }
                                     }
-                                    if (g_ComViewIndex > -1 && g_compare_pog_flag == "Y" && g_compare_view == "EDIT_PALLET") {
-                                        await edit_pallet("Y", g_edit_pallet_mod_ind, g_edit_pallet_shelf_ind, g_ComBaseIndex, "Y");
-                                    }
-                                    // removeLoadingIndicator(regionloadWait); //ASA-1500
-                                    $(".open_product").css("display", "block");
                                     $s("P193_UPLD_ID", "");
                                 }
                                 doSomething();
@@ -12771,10 +9424,6 @@ async function onload_create_pog() {
                                     addLoadingIndicator();
                                     var retval = await create_all_pog_onload(POG_JSON);
                                     removeLoadingIndicator(regionloadWait);
-
-                                    if (g_ComViewIndex > -1 && g_compare_pog_flag == "Y" && g_compare_view == "EDIT_PALLET") {
-                                        await edit_pallet("Y", g_edit_pallet_mod_ind, g_edit_pallet_shelf_ind, g_ComBaseIndex, "Y");
-                                    }
                                 }
                                 doSomething();
                             }
@@ -12785,7 +9434,8 @@ async function onload_create_pog() {
                         }
                     });
                 } else {
-                    if (sessionStorage.getItem("POGExists") == "Y" && $v("P193_NEW_SESSION") == "N") {
+                    // && $v("P193_NEW_SESSION") == "N"
+                    if (sessionStorage.getItem("POGExists") == "Y") {
                         if (typeof g_pog_json[g_pog_index] !== "undefined" && g_pog_json.length > 0) {
                             POG_JSON = JSON.parse(JSON.stringify(g_pog_json));
                             create_json = "N";
@@ -12801,10 +9451,6 @@ async function onload_create_pog() {
                         addLoadingIndicator();
                         var retval = await create_all_pog_onload(POG_JSON);
                         removeLoadingIndicator(regionloadWait);
-
-                        if (g_ComViewIndex > -1 && g_compare_pog_flag == "Y" && g_compare_view == "EDIT_PALLET") {
-                            await edit_pallet("Y", g_edit_pallet_mod_ind, g_edit_pallet_shelf_ind, g_ComBaseIndex, "Y");
-                        }
                         if (g_pog_json.length > 1) {
                             animate_all_pog();
                         }
@@ -12849,31 +9495,6 @@ function remove_param_on_load() {
     }
 }
 
-// Moved to common -> WPD 3.js
-// function generateCanvasListHolder(p_pog_json) {
-// 	$("#canvas-list-holder").html("");
-// 	if (p_pog_json.length > 0) {
-// 		$("#canvas-list-holder").css({
-// 			display: "flex",
-// 			width: "auto",
-// 		});
-// 		$("#canvas-list-holder").append('<div class="canvas-holder-div"><span class="canvas-holder-code expand-tab" onclick="expandAllPog()">' + g_expand_all_pog + "</span></div>");
-
-// 		for (i = 0; i < p_pog_json.length; i++) {
-// 			console.log("generage", i);
-// 			$("#canvas-list-holder").append('<div class="canvas-holder-div"><span class="canvas-holder-code">' + p_pog_json[i].POGCode + '</span><span class="fa fa-window-arrow-up canvas-expand" onClick=expandPog(' + i + ')></span><span class="fa fa-window-maximize canvas-max" onclick="maximizePog(' + i + ', 0)"></span><span class="fa fa-close canvas-close" onclick="closePog(' + i + ', 0)"></span></div>');
-// 		}
-// 		if ($("#canvas-list-holder").width() >= window.innerWidth) {
-// 			$("#canvas-list-holder").css("width", "100%");
-// 		}
-// 	} else {
-// 		$("#canvas-list-holder").css({
-// 			display: "none",
-// 			width: "auto",
-// 		});
-// 	}
-// }
-
 function sessionGetCombineDetails() {
     try {
         logDebug("function : sessionGetCombineDetails", "S");
@@ -12902,7 +9523,6 @@ function sessionGetCombineDetails() {
         error_handling(err);
     }
 }
-
 
 function sessionSetCombineDetails() {
     try {
@@ -12942,352 +9562,6 @@ function sessionSetCombineDetails() {
         logDebug("function : sessionSetCombineDetails", "E");
         error_handling(err);
     }
-}
-
-// Moved to common JS
-// async function update_module_block_list(p_action_ind, p_old_blk_name, p_escape_ind = "N") {
-//     var block_detail = {};
-//     var filters_arr = [];
-//     var attr_arr = [];
-//     var filter_val = [];
-//     var blk_name_arr = [];
-//     var upd_block_dtl = {};
-//     var blockName = $v("P193_BLK_NAME") + "_AFP";
-//     if (p_escape_ind == "Y") {
-//         var block_details_arr = [];
-//         for (const obj of g_mod_block_list) {
-//             var details = {};
-//             details["BlkColor"] = obj.BlkColor;
-//             details["BlkName"] = obj.BlkName;
-//             details["BlkRule"] = obj.BlkRule;
-//             details["BlkFilters"] = obj.BlockFilters.join(" AND ");
-//             details["OldBlkName"] = obj.BlkName;
-//             obj["BlkFilters"] = details["BlkFilters"];
-//             block_details_arr.push(details);
-//         }
-//         closeInlineDialog("block_details");
-//         var retval = await save_blk_dtl_coll(p_action_ind, p_old_blk_name, block_details_arr);
-//     } else {
-//         if (p_old_blk_name == blockName && p_action_ind == "U") {
-//             blk_name_arr = [];
-//         } else {
-//             blk_name_arr = [blockName];
-//         }
-
-//         block_detail["BlkName"] = blockName;
-//         block_detail["BlkColor"] = $v("P193_BLK_COLOR");
-//         block_detail["BlkRule"] = $v("P193_BLK_RULE");
-//         var shelf_arr = [];
-//         var mod_index = [];
-//         var final_shelf_arr = [];
-
-//         if (p_action_ind !== "U") {
-//             var mod_ind = -1;
-//             for (const objects of g_delete_details) {
-//                 if (objects.ObjType !== "TEXTBOX") {
-//                     shelf_arr.push(objects);
-//                     if (mod_ind !== objects.MIndex) {
-//                         mod_index.push(objects.MIndex);
-//                     }
-//                     objects.BlkName = block_detail["BlkName"];
-//                     mod_ind = objects.MIndex;
-//                 }
-//             }
-//             mod_index.sort();
-//             if (g_mod_block_list.length > 0) {
-//                 for (const shelfs of shelf_arr) {
-//                     var valid = true;
-//                     for (const obj of g_mod_block_list) {
-//                         if (!valid) break;
-//                         for (const dtl of obj.g_delete_details) {
-//                             if (shelfs.MIndex == dtl.MIndex && shelfs.SIndex == dtl.SIndex) {
-//                                 valid = false;
-//                                 break;
-//                             }
-//                         }
-//                     }
-//                     if (valid) final_shelf_arr.push(shelfs);
-//                 }
-//             } else {
-//                 final_shelf_arr = shelf_arr;
-//             }
-//         } else {
-//             for (const obj of g_mod_block_list) {
-//                 if (obj.BlkName == p_old_blk_name) {
-//                     final_shelf_arr = obj.g_delete_details;
-//                     mod_index = obj.mod_index;
-//                     block_detail["DragMouseStart"] = obj.DragMouseStart;
-//                     block_detail["DragMouseEnd"] = obj.DragMouseEnd;
-//                     break;
-//                 }
-//             }
-//             for (const obj of final_shelf_arr) {
-//                 obj.BlkName = block_detail["BlkName"];
-//             }
-//             g_DragMouseStart = block_detail["DragMouseStart"];
-//             g_DragMouseEnd = block_detail["DragMouseEnd"];
-//         }
-//         block_detail["g_delete_details"] = final_shelf_arr;
-
-//         var model = apex.region("block_filters").widget().interactiveGrid("getViews", "grid").model;
-
-//         model.forEach(function (record) {
-//             var filters = typeof model.getValue(record, "FILTER") == "object" ? model.getValue(record, "FILTER").v : model.getValue(record, "FILTER");
-//             var value = model.getValue(record, "VALUE");
-//             filter_val.push(filters + "#" + value);
-//             if (filters !== "") {
-//                 var filter_list = filters.split("-");
-//                 attr_arr.push(filter_list[0]);
-//                 filters_arr.push(filter_list[0] + " = " + (filter_list[1] == "C" ? '"' : "") + value + (filter_list[1] == "C" ? '"' : ""));
-//             }
-//         });
-
-//         for (const obj of g_mod_block_list) {
-//             blk_name_arr.push(obj.BlkName);
-//         }
-
-//         var blk_dup = findDuplicates(blk_name_arr);
-//         var dup_arr = findDuplicates(attr_arr);
-
-//         if (blk_dup.length > 0) {
-//             alert(get_message("POGCR_BLK_DUP"));
-//         } else if (dup_arr.length > 0) {
-//             alert(get_message("POGCR_DUP_REC_FOUND"));
-//         } else if (attr_arr.includes("SUBCLASS") && (!attr_arr.includes("CLASS") || !attr_arr.includes("DEPT"))) {
-//             alert(get_message("POGCR_DEPT_CLASS_MANDATE"));
-//         } else if (attr_arr.includes("CLASS") && !attr_arr.includes("DEPT")) {
-//             alert(get_message("POGCR_DEPT_MANDATE"));
-//         } else {
-//             block_detail["BlockFilters"] = filters_arr;
-//             block_detail["FilterVal"] = filter_val;
-//             block_detail["mod_index"] = mod_index;
-//             if (p_action_ind == "U") {
-//                 for (const obj of g_mod_block_list) {
-//                     if (obj.BlkName == p_old_blk_name) {
-//                         for (const child of obj.BlockDim.ColorObj.children) {
-//                             if (child.uuid == p_old_blk_name) {
-//                                 obj.BlockDim.ColorObj.remove(child);
-//                                 break;
-//                             }
-//                         }
-//                     }
-//                 }
-//                 var i = 0;
-//                 for (const obj of g_mod_block_list) {
-//                     if (obj.BlkName == p_old_blk_name) {
-//                         upd_block_dtl = JSON.parse(JSON.stringify(obj));
-//                         g_mod_block_list.splice(i, 1);
-//                     }
-//                     i++;
-//                 }
-//             }
-
-//             apex.region("block_filters").widget().interactiveGrid("getActions").set("edit", false);
-//             apex.region("block_filters").widget().interactiveGrid("getViews", "grid").model.clearChanges();
-//             apex.region("block_filters").refresh();
-
-//             clear_blinking();
-//             var ret_dtl = await colorAutofillBlock(g_DragMouseStart, g_DragMouseEnd, mod_index, $v("P193_BLK_COLOR"), blockName, p_action_ind, upd_block_dtl, g_pog_index, "N");
-//             block_detail["BlockDim"] = ret_dtl;
-//             g_mod_block_list.push(block_detail);
-
-//             closeInlineDialog("block_details");
-
-//             if (p_action_ind == "U") {
-//                 var block_details_arr = [];
-//                 for (const obj of g_mod_block_list) {
-//                     if (obj.BlkName !== blockName && obj.BlkName !== p_old_blk_name) {
-//                         var details = {};
-//                         details["BlkColor"] = obj.BlkColor;
-//                         details["BlkName"] = obj.BlkName;
-//                         details["BlkRule"] = obj.BlkRule;
-//                         details["BlkFilters"] = obj.BlockFilters.join(" AND ");
-//                         details["OldBlkName"] = obj.BlkName;
-//                         obj["BlkFilters"] = details["BlkFilters"];
-//                         block_details_arr.push(details);
-//                     } else if (obj.BlkName == p_old_blk_name || obj.BlkName == blockName) {
-//                         var details = {};
-//                         details["BlkColor"] = $v("P193_BLK_COLOR");
-//                         details["BlkName"] = blockName;
-//                         details["BlkRule"] = $v("P193_BLK_RULE");
-//                         details["BlkFilters"] = filters_arr.join(" AND ");
-//                         details["OldBlkName"] = p_old_blk_name;
-//                         obj["BlkFilters"] = details["BlkFilters"];
-//                         block_details_arr.push(details);
-//                     }
-//                 }
-//                 var retval = await save_blk_dtl_coll(p_action_ind, p_old_blk_name, block_details_arr);
-//             } else if (p_action_ind == "Y" || p_action_ind == "A") {
-//                 var block_details_arr = [];
-//                 for (const obj of g_mod_block_list) {
-//                     var details = {};
-//                     details["BlkColor"] = obj.BlkColor;
-//                     details["BlkName"] = obj.BlkName;
-//                     details["BlkRule"] = obj.BlkRule;
-//                     details["BlkFilters"] = obj.BlockFilters.join(" AND ");
-//                     obj["BlkFilters"] = details["BlkFilters"];
-//                     block_details_arr.push(details);
-//                 }
-//                 var retval = await save_blk_dtl_coll(p_action_ind, p_old_blk_name, block_details_arr);
-//             }
-//         }
-//     }
-// }
-
-function clear_auto_fill_coll() {
-    g_auto_fill_active = "N";
-    g_auto_fill_reg_open = "N";
-    g_autofill_edit = "N";
-    apex.server.process(
-        "DELETE_AUTOFILL_COLL", {
-        x01: "",
-    }, {
-        dataType: "text",
-        success: async function (pData) {
-            for (const obj of g_mod_block_list) {
-                for (const child of obj.BlockDim.ColorObj.children) {
-                    if (child.uuid == obj.BlkName) {
-                        obj.BlockDim.ColorObj.remove(child);
-                        break;
-                    }
-                }
-            }
-            render(g_pog_index);
-            // apex.region("autofill_products").refresh();
-            if (apex.region("mod_block_details") !== null) {
-                apex.region("mod_block_details").refresh();
-            }
-            console.log("pData", pData);
-            $s("P193_MULTI_PRODUCT", "");
-            $(".dropdown").removeClass("disable_dropdown");
-            $(".live_image").removeClass("disable_dropdown");
-            $(".3d_popup").removeClass("disable_dropdown");
-            $(".open_product").removeClass("disable_dropdown");
-            $(".left_icon").removeClass("disable_dropdown");
-            $(".autofill_btn").removeClass("item_label_active");
-        },
-        loadingIndicatorPosition: "page",
-    });
-}
-
-
-function getAutoFillCurrModule(p_finalX, p_finalY, p_module_index, p_pog_index) {
-    logDebug("function : getAutoFillCurrModule; pfinalX : " + p_finalX + "; pFinalY : " + p_finalY + "; p_module_index : " + p_module_index, "S");
-    try {
-        var curr_module = -1;
-        var i = 0;
-        var j = 0;
-        //Checking dragged object is in which module
-        var i = 0;
-        for (modules of g_pog_json[p_pog_index].ModuleInfo) {
-            //ASA-1085
-            if (parseFloat(p_finalX) > parseFloat(modules.X) - modules.W / 2 && parseFloat(p_finalX) < parseFloat(modules.X) + modules.W / 2 && parseFloat(p_finalY) > parseFloat(modules.Y) - modules.H / 2 && parseFloat(p_finalY) < parseFloat(modules.Y) + modules.H / 2 && (modules.ParentModule == null || typeof modules.ParentModule == "undefined")) {
-                curr_module = i;
-                break;
-            }
-            i++;
-        }
-
-        logDebug("function : getAutoFillCurrModule", "E");
-        return curr_module;
-    } catch (err) {
-        error_handling(err);
-    }
-}
-
-function getAutoFillCurrShelf(p_blockStart, p_blockEnd, p_module_index, p_pog_index) {
-    logDebug("function : getAutoFillCurrShelf; pBlockStart : " + p_blockStart + "; pBlockEnd : " + p_blockEnd + "; p_module_index : " + p_module_index, "S");
-    try {
-        var curr_shelf = -1;
-        var i = 0;
-        for (shelfs of g_pog_json[p_pog_index].ModuleInfo[p_module_index].ShelfInfo) {
-            //ASA-1085
-            if (parseFloat(p_blockStart.y) > parseFloat(shelfs.Y) - shelfs.H / 2 && parseFloat(p_blockEnd.y) < parseFloat(shelfs.Y) + shelfs.H / 2) {
-                curr_shelf = i;
-                break;
-            }
-            i++;
-        }
-
-        logDebug("function : getAutoFillCurrShelf", "E");
-        return curr_shelf;
-    } catch (err) {
-        error_handling(err);
-    }
-}
-
-async function swapColoredBlocks(p_swapBlock, p_dragBlock, p_pog_index) {
-    logDebug("function : swapColoredBlocks; pSwapBlock : " + p_swapBlock, "S");
-
-    var dragModule = p_dragBlock.BlockDim.ColorObj;
-    var dragBlockCalcX = parseFloat(p_dragBlock.BlockDim.CalcX);
-    var dragBlockCalcY = parseFloat(p_dragBlock.BlockDim.CalcY);
-    var dragBlockFinalTop = parseFloat(p_dragBlock.BlockDim.FinalTop);
-    var dragBlockFinalBtm = parseFloat(p_dragBlock.BlockDim.FinalBtm);
-    var dragBlockW = parseFloat(p_dragBlock.BlockDim.BlkWidth);
-    var dragBlockH = parseFloat(p_dragBlock.BlockDim.BlkHeight);
-    var dragBlockDelDetails = JSON.parse(JSON.stringify(p_dragBlock.g_delete_details));
-    var dragBlockMod = JSON.parse(JSON.stringify(p_dragBlock.mod_index));
-    var dragBlockObj = dragModule.getObjectByProperty("uuid", g_dragItem.uuid); //ASA-1085
-
-    var swapModule = p_swapBlock.BlockDim.ColorObj;
-    var swapBlockCalcX = parseFloat(p_swapBlock.BlockDim.CalcX);
-    var swapBlockCalcY = parseFloat(p_swapBlock.BlockDim.CalcY);
-    var swapBlockFinalTop = parseFloat(p_swapBlock.BlockDim.FinalTop);
-    var swapBlockFinalBtm = parseFloat(p_swapBlock.BlockDim.FinalBtm);
-    var swapBlockW = parseFloat(p_swapBlock.BlockDim.BlkWidth);
-    var swapBlockH = parseFloat(p_swapBlock.BlockDim.BlkHeight);
-    var swapBlockDelDetails = JSON.parse(JSON.stringify(p_swapBlock.g_delete_details));
-    var swapBlockMod = JSON.parse(JSON.stringify(p_swapBlock.mod_index));
-    var swapBlockObj = swapModule.getObjectByProperty("uuid", p_swapBlock.BlkName);
-
-    p_swapBlock.BlockDim.CalcX = dragBlockCalcX;
-    p_swapBlock.BlockDim.CalcY = dragBlockCalcY;
-    p_swapBlock.BlockDim.FinalTop = dragBlockFinalTop;
-    p_swapBlock.BlockDim.FinalBtm = dragBlockFinalBtm;
-    p_swapBlock.BlockDim.BlkWidth = dragBlockW;
-    p_swapBlock.BlockDim.BlkHeight = dragBlockH;
-    p_swapBlock.mod_index = dragBlockMod;
-    p_swapBlock.g_delete_details = dragBlockDelDetails;
-    for (g_shelf of p_swapBlock.g_delete_details) {
-        g_shelf.BlkName = p_swapBlock.BlkName;
-    }
-    swapBlockObj.position.x = dragBlockCalcX;
-    swapBlockObj.position.y = dragBlockCalcY;
-    swapBlockObj.geometry.dispose();
-    swapBlockObj.geometry = new THREE.BoxGeometry(dragBlockW, dragBlockH, 0.001);
-
-    p_dragBlock.BlockDim.CalcX = swapBlockCalcX;
-    p_dragBlock.BlockDim.CalcY = swapBlockCalcY;
-    p_dragBlock.BlockDim.FinalTop = swapBlockFinalTop;
-    p_dragBlock.BlockDim.FinalBtm = swapBlockFinalBtm;
-    p_dragBlock.BlockDim.BlkWidth = swapBlockW;
-    p_dragBlock.BlockDim.BlkHeight = swapBlockH;
-    p_dragBlock.mod_index = swapBlockMod;
-    p_dragBlock.g_delete_details = swapBlockDelDetails;
-    for (g_shelf of p_dragBlock.g_delete_details) {
-        g_shelf.BlkName = p_dragBlock.BlkName;
-    }
-    dragBlockObj.position.x = swapBlockCalcX;
-    dragBlockObj.position.y = swapBlockCalcY;
-    dragBlockObj.geometry.dispose();
-    dragBlockObj.geometry = new THREE.BoxGeometry(swapBlockW, swapBlockH, 0.001);
-
-    swapModule.remove(swapBlockObj);
-    dragModule.remove(dragBlockObj);
-    swapModule.add(dragBlockObj);
-    dragModule.add(swapBlockObj);
-
-    p_dragBlock.BlockDim.ColorObj = swapModule;
-    p_swapBlock.BlockDim.ColorObj = dragModule;
-
-    dragModule.updateMatrix();
-    swapModule.updateMatrix();
-    dragBlockObj.updateMatrix();
-    swapBlockObj.updateMatrix();
-    render(p_pog_index);
-
-    logDebug("function : swapColoredBlocks", "E");
 }
 
 
@@ -13598,6 +9872,7 @@ async function get_multiselect_obj(p_pog_index) {
 }
 
 function setDetailsArray(p_objID, p_mIndex, p_sIndex, p_objWidth, p_objHeight, p_xAxis, p_yAxis, p_zAxis, p_iIndex, p_objType, p_isDivider, p_object, p_mObjID, p_sObjID, p_itemid, p_item, p_exists, p_rotation, p_slope, p_distance, p_topObjId, p_bottomObjId, p_startCanvas, p_present_canvas, p_pog_index) {
+    logDebug("function : setDetailsArray", "S");
     var details = {};
     details["ObjID"] = p_objID;
     details["MIndex"] = p_mIndex;
@@ -13659,658 +9934,14 @@ function setDetailsArray(p_objID, p_mIndex, p_sIndex, p_objWidth, p_objHeight, p
         details["ReduceToFit"] = g_pog_json[p_pog_index].ModuleInfo[p_mIndex].ShelfInfo[p_sIndex].ReduceToFit;
         details["WrapText"] = g_pog_json[p_pog_index].ModuleInfo[p_mIndex].ShelfInfo[p_sIndex].WrapText;
     } //ASA-1669
+    logDebug("function : setDetailsArray", "E");
     return details;
 }
 
-async function comparePOG(p_compare_ind, p_pog_code, p_pog_version, p_draft_id, p_prev_version, p_compare_pog = 'N', p_show_change_blocks = []) { //ASA-1803 Issue 1 added p_compare_pog  //ASA-1986 
-    logDebug("function : comparePOG", "S");
-    await get_compare_pog(p_compare_ind, p_pog_code, p_pog_version, p_draft_id, p_prev_version, p_compare_pog, p_show_change_blocks);  //ASA-1986 
-    logDebug("function : comparePOG", "E");
-}
-function fit_pog_to_canvas_default(p_pog_index) {
-    try {
-        if (typeof p_pog_index === "undefined" || p_pog_index === null || p_pog_index < 0) {
-            return;
-        }
-        if (!Array.isArray(g_scene_objects) || typeof g_scene_objects[p_pog_index] === "undefined") {
-            return;
-        }
-        var details = get_min_max_xy(p_pog_index);
-        var details_arr = details.split("###");
-        var fitCamera = g_scene_objects[p_pog_index].scene.children[0];
-        set_camera_z(fitCamera, parseFloat(details_arr[2]), parseFloat(details_arr[3]), parseFloat(details_arr[0]), parseFloat(details_arr[1]), g_offset_z, parseFloat(details_arr[4]), parseFloat(details_arr[5]), false, p_pog_index);
-        render(p_pog_index);
-    } catch (err) {
-        error_handling(err);
-    }
-}
-// ASA-1986 start
-async function render_compare_pog_blocks_from_snapshot(p_blocks_snapshot, p_compare_index) {
-    var blocksToRender = Array.isArray(p_blocks_snapshot) ? wpdBuildShowChangesBlockSnapshot(p_blocks_snapshot) : [];
-    if (blocksToRender.length === 0) {
-        return;
-    }
-    g_mod_block_list = [];
-    for (const blkDet of blocksToRender) {
-        if (typeof blkDet === "undefined" || blkDet == null) {
-            continue;
-        }
-        g_DragMouseStart = {
-            x: Number(blkDet.DragMouseStart && typeof blkDet.DragMouseStart.x !== "undefined" ? blkDet.DragMouseStart.x : 0),
-            y: Number(blkDet.DragMouseStart && typeof blkDet.DragMouseStart.y !== "undefined" ? blkDet.DragMouseStart.y : 0)
-        };
-        g_DragMouseEnd = {
-            x: Number(blkDet.DragMouseEnd && typeof blkDet.DragMouseEnd.x !== "undefined" ? blkDet.DragMouseEnd.x : 0),
-            y: Number(blkDet.DragMouseEnd && typeof blkDet.DragMouseEnd.y !== "undefined" ? blkDet.DragMouseEnd.y : 0)
-        };
-        if (Array.isArray(blkDet.BlkModInfo) && blkDet.BlkModInfo.length > 0 && Array.isArray(blkDet.BlkShelfInfo) && blkDet.BlkShelfInfo.length > 0) {
-            g_autofillModInfo = JSON.parse(JSON.stringify(blkDet.BlkModInfo));
-            g_autofillShelfInfo = JSON.parse(JSON.stringify(blkDet.BlkShelfInfo));
-        } else {
-            [g_autofillModInfo, g_autofillShelfInfo] = getAutofillModShelf(g_DragMouseStart, g_DragMouseEnd, g_pog_json, p_compare_index);
-        }
-        if (!Array.isArray(g_autofillModInfo) || g_autofillModInfo.length === 0 || !Array.isArray(g_autofillShelfInfo) || g_autofillShelfInfo.length === 0) {
-            continue;
-        }
-        await setAutofillBlock("A", blkDet.BlkName, "N", "N", blkDet.BlkColor || "#FFFFFF");
-    }
-}
-
-async function render_compare_pog_blocks(p_pog_code, p_pog_version, p_compare_index, p_show_change_blocks = []) {
-    var oldPogIndex = g_pog_index;
-    var oldModBlockList = g_mod_block_list;
-    var oldAutoFillActive = g_auto_fill_active;
-    var oldDragMouseStart = g_DragMouseStart;
-    var oldDragMouseEnd = g_DragMouseEnd;
-    var oldAutofillDetail = g_autofill_detail;
-    try {
-        g_pog_index = p_compare_index;
-        g_auto_fill_active = "Y";
-        g_mod_block_list = [];
-        g_autofill_detail = {};
-        var l_snapshot_blocks = Array.isArray(p_show_change_blocks) ? p_show_change_blocks : [];
-        if (l_snapshot_blocks.length > 0) {
-            await render_compare_pog_blocks_from_snapshot(l_snapshot_blocks, p_compare_index);
-        } else {
-            await auto_fill_setup(1);
-            if (!g_mod_block_list || g_mod_block_list.length === 0) {
-                await createDynamicBlocks(p_pog_code, "N", p_pog_version, "N",$v('P193_EXISTING_DRAFT_VER'));
-            } else {
-                apex.region("mod_block_details").refresh();
-            }
-        }
-             // Keep Show Changes compare canvas at default fitted view on open.
-        fit_pog_to_canvas_default(p_compare_index);
-        
-        // Keep Show Changes compare canvas at default fitted view on open.
-        var details = get_min_max_xy(p_compare_index);
-        var details_arr = details.split("###");
-        var compareCamera = g_scene_objects[p_compare_index].scene.children[0];
-        set_camera_z(compareCamera, parseFloat(details_arr[2]), parseFloat(details_arr[3]), parseFloat(details_arr[0]), parseFloat(details_arr[1]), g_offset_z, parseFloat(details_arr[4]), parseFloat(details_arr[5]), false, p_compare_index);
-
-        render(p_compare_index);
-    } catch (err) {
-        error_handling(err);
-    } finally {
-        g_pog_index = oldPogIndex;
-        g_auto_fill_active = oldAutoFillActive;
-        g_mod_block_list = oldModBlockList;
-        g_autofill_detail = oldAutofillDetail;
-        g_DragMouseStart = oldDragMouseStart;
-        g_DragMouseEnd = oldDragMouseEnd;
-    }
-}
-// ASA-1986 end
-async function get_compare_pog(p_compare_ind, p_pog_code, p_pog_version, p_draft_id, p_prev_version, p_compare_pog = "N", p_show_change_blocks = []) {// ASA-1986 
-    //ASA-1803 Issue 1 added p_compare_pog
-    logDebug("function : get_compare_pog; compare_ind : " + p_compare_ind + "; pog_code : " + p_pog_code + "; pog_version : " + p_pog_version + "; draft_id : " + p_draft_id + "; prev_version : " + p_prev_version, "S");
-    try {
-        if (p_prev_version == "Y") {
-            $(".item_color_legends").css("display", "none");
-        }
-        addLoadingIndicator();
-        var new_pog_ind,
-            pog_opened,
-            old_pog_index = g_pog_index;
-        if (p_compare_ind == "1") {
-            new_pog_ind = "N";
-            pog_opened = "E";
-        } else {
-            new_pog_ind = "Y";
-            pog_opened = "N";
-        }
-
-        var p = apex.server.process(
-            "GET_COMPARE_JSON", {
-            x01: p_compare_ind,
-            x02: p_pog_code,
-            x03: p_pog_version,
-            x04: p_draft_id,
-        }, {
-            dataType: "html",
-        });
-        // When the process is done, set the value to the page item
-        p.done(function (data) {
-            var return_data = $.trim(data);
-            if (return_data.match(/ERROR.*/)) {
-                raise_error(return_data);
-                removeLoadingIndicator(regionloadWait);
-            } else if (return_data !== "") {
-                g_json = JSON.parse($.trim(data));
-                var TEMP_POG = JSON.parse(JSON.stringify(g_pog_json));
-                g_pog_json_data = g_json;
-                var module_details = g_pog_json_data[0].ModuleInfo;
-                i = 0;
-                for (const modules of module_details) {
-                    if (modules.ShelfInfo == null || typeof modules.ShelfInfo == "undefined") {
-                        modules.ShelfInfo = [];
-                    }
-
-                    if (typeof modules.ParentModule == "undefined" || modules.ParentModule == null) {
-                        if (modules.SubDept !== null && typeof modules.SubDept !== "undefined") {
-                            subdept = modules.SubDept;
-                        }
-
-                        j = 0;
-
-                        for (const shelfs of modules.ShelfInfo) {
-                            if (typeof shelfs.ItemInfo == "undefined" || shelfs.ItemInfo == null) {
-                                shelfs.ItemInfo = [];
-                            }
-                            j = j + 1;
-                        }
-                    }
-
-                    i = i + 1;
-                }
-                $(".live_image").css("color", "#c7c7c7").removeAttr("onclick").css("cursor", "auto");
-                $(".open_pdf").css("color", "#c7c7c7").removeAttr("onclick").css("cursor", "auto");
-                $(".open_pdf_online").css("color", "#c7c7c7").removeAttr("onclick").css("cursor", "auto");
-
-                async function doSomething() {
-                    g_pog_json_data[0].PreVersion = "";
-                    var new_pog_json = g_pog_json_data[0];
-                    g_comp_base_code = new_pog_json.POGCode;
-                    new_pog_json.PreVersion = "Y";
-                    if (p_compare_pog != "Y") {
-                        //ASA-1803 Issue 2
-                        new_pog_json.POGCode = new_pog_json.POGCode + "-" + "PREV_VERSION";
-                    } else {
-                        new_pog_json.POGCode = new_pog_json.POGCode;
-                    }
-                    g_ComBaseIndex = old_pog_index;
-                    g_colorBackup = "N";
-                    g_comp_view_code = new_pog_json.POGCode;
-
-                    if (g_compare_pog_flag == "Y" && g_compare_view == "PREV_VERSION") {
-                        g_pog_json[g_ComViewIndex] = new_pog_json;
-                        g_ComViewIndex = g_ComViewIndex;
-                        init(g_ComViewIndex);
-                        var objects = {};
-                        objects["scene"] = g_scene;
-                        objects["renderer"] = g_renderer;
-                        g_scene_objects[g_ComViewIndex] = objects;
-                    } else {
-                        g_pog_json.push(new_pog_json);
-                        g_ComViewIndex = g_pog_json.length - 1;
-                        appendMultiCanvasRowCol(g_pog_json.length, $v("P193_POGCR_TILE_VIEW"));
-                        init(g_ComViewIndex);
-                        var objects = {};
-                        objects["scene"] = g_scene;
-                        objects["renderer"] = g_renderer;
-                        g_scene_objects.push(objects);
-                    }
-
-                    var POG_JSON = JSON.parse(JSON.stringify(g_pog_json));
-                    g_json = [g_pog_json[g_ComViewIndex]]; //ASA-1418
-
-                    g_compare_view = p_prev_version == "Y" ? "PREV_VERSION" : "POG";
-                    g_compare_pog_flag = "Y";
-                    set_indicator_objects(g_ComViewIndex);
-                    modifyWindowAfterMinMax(g_scene_objects);
-                    g_pog_index = g_ComViewIndex;
-                    g_multi_pog_json = [];
-                    g_world = g_scene_objects[g_ComViewIndex].scene.children[2];
-                    g_camera = g_scene_objects[g_ComViewIndex].scene.children[0];
-
-                    var return_val = await create_module_from_json(POG_JSON, new_pog_ind, "F", $v("P193_PRODUCT_BTN_CLICK"), pog_opened, "N", "N", "Y", "Y", "", "Y", g_scene_objects[g_ComViewIndex].scene.children[0], g_scene_objects[g_ComViewIndex].scene, g_pog_index, g_ComViewIndex);
-                    if (p_compare_pog == "Y") {
-                        var l_old_pog_edited_ind = g_pog_edited_ind;
-                        await clear_item("N", "N", g_ComViewIndex);
-                        g_pog_edited_ind = l_old_pog_edited_ind;
-                    }
-                    removeLoadingIndicator(regionloadWait);
-                    render(g_ComViewIndex);
-                    if (p_compare_pog == "Y") { // ASA-1986 start
-                        await render_compare_pog_blocks(new_pog_json.POGCode, new_pog_json.Version, g_ComViewIndex, p_show_change_blocks);
-                            fit_pog_to_canvas_default(g_ComBaseIndex);
-                        fit_pog_to_canvas_default(g_ComViewIndex);
-                        if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
-                            window.requestAnimationFrame(function () {
-                                fit_pog_to_canvas_default(g_ComBaseIndex);
-                                fit_pog_to_canvas_default(g_ComViewIndex);
-                            });
-                        }
-                    }
-
-                    if (p_prev_version == "Y") {
-                        if (g_show_item_color == "Y") {
-                            var res = await showItemColor("OFF", g_ComViewIndex);
-                        }
-                        var res1 = await two_pog_diff_checker(g_ComBaseIndex, g_ComViewIndex, p_compare_pog); //ASA-1803 issue 1 Added p_compare_pog
-                        var res = await calculateFixelAndSupplyDays("N", g_ComViewIndex);
-                    }
-
-                    render(g_pog_index);
-                    g_pog_index = old_pog_index;
-                    add_pog_code_header();
-                }
-                doSomething();
-
-                $s("P193_OPEN_DRAFT", "Y");
-                g_auto_position_ind = "N";
-                g_dblclick_opened = "N";
-            }
-        });
-    } catch (err) {
-        error_handling(err);
-        removeLoadingIndicator(regionloadWait);
-    }
-}
-
-async function modifyWindowAfterMinMax(p_scene_objects) {
-    g_scene_objects = [];
-    console.log("modify");
-    g_canvas_objects = [];
-    var old_pogIndex = g_pog_index;
-    for (var i = 0; i < p_scene_objects.length; i++) {
-        init(i);
-        var canvasName = "maincanvas";
-        if (i > 0) {
-            canvasName = "maincanvas" + (i + 1);
-        }
-        g_camera = p_scene_objects[i].scene.getObjectByProperty("type", "PerspectiveCamera");
-        g_scene = p_scene_objects[i].scene;
-        g_pog_index = i;
-        console.log("scene", g_scene.uuid);
-        var canvasContainerH = $("#" + canvasName).parent()[0].offsetHeight;
-        var canvasContainerW = $("#" + canvasName).parent()[0].offsetWidth;
-        var canvasBtns = $("#" + canvasName + "-btns")[0];
-        var canvasBtns_height;
-        if (typeof canvasBtns !== "undefined") {
-            canvasBtns_height = canvasBtns.offsetHeight;
-        } else {
-            canvasBtns_height = 0;
-        }
-        var canvasWidthOrg = canvasContainerW;
-        var canvasHeightOrg = canvasContainerH - canvasBtns_height;
-        $("#" + canvasName)
-            .css("height", canvasHeightOrg + "px !important")
-            .css("width", canvasWidthOrg + "px !important");
-        $("#" + canvasName).height(canvasHeightOrg); //ASA-1107
-        $("#" + canvasName).width(canvasWidthOrg); //ASA-1107
-        g_camera.aspect = canvasWidthOrg / canvasHeightOrg;
-        g_camera.fov = (360 / Math.PI) * Math.atan(g_tanFOV);
-        g_camera.updateProjectionMatrix();
-
-        var details = get_min_max_xy(i);
-        var details_arr = details.split("###");
-        set_camera_z(g_camera, parseFloat(details_arr[2]), parseFloat(details_arr[3]), parseFloat(details_arr[0]), parseFloat(details_arr[1]), g_offset_z, parseFloat(details_arr[4]), parseFloat(details_arr[5]), true, i);
-
-        objects = {};
-        objects["scene"] = g_scene;
-        objects["renderer"] = g_renderer;
-        console.log("objects", objects);
-        g_scene_objects.push(objects);
-        set_indicator_objects(i);
-        render(i);
-    }
-    g_pog_index = old_pogIndex;
-}
-
-async function createDynamicBlocks(
-    p_pog_code,
-    p_draft_pog,
-    p_pog_version,
-    p_pog_draft_version = "",
-    p_saveColl = "Y",
-    p_attr_val = "",
-) {
-
-    return new Promise((resolve, reject) => {
-
-        apex.server.process(
-            "CREATE_DYNAMIC_BLOCK",
-            {
-                x01: p_pog_code,
-                x02: p_pog_version,
-                x03: p_attr_val,
-                x04: p_draft_pog == "Y" ? p_pog_draft_version : "",
-                //p_clob_01: JSON.stringify(g_pog_json[g_pog_index])
-            },
-            {
-                dataType: "json",
-
-                success: async function (data) {
-
-                    try {
-
-                        console.log("Blocks:", data);
-                        for (const row of data) {
-
-                            // Create start/end coords
-                            g_DragMouseStart = {
-                                x: Number(row.x1),
-                                y: Number(row.y1)
-                            };
-
-                            g_DragMouseEnd = {
-                                x: Number(row.x2),
-                                y: Number(row.y2)
-                            };
-
-                            console.log(
-                                "Start:", g_DragMouseStart,
-                                "End:", g_DragMouseEnd
-                            );
-
-                            // Get autofill info
-                            [
-                                g_autofillModInfo,
-                                g_autofillShelfInfo
-                            ] = getAutofillModShelf(
-                                g_DragMouseStart,
-                                g_DragMouseEnd,
-                                g_pog_json,
-                                g_pog_index
-                            );
-
-                            console.log("Mod Info:", g_autofillModInfo);
-                            console.log("Shelf Info:", g_autofillShelfInfo);
-
-                            // Create block
-                            var isBlockCreated = await setAutofillBlock( // ASA-1986 start
-                                'A',
-                                row.block_name,
-                                'N',
-                                'N',
-                                row.color,
-                            );
-                            if (isBlockCreated !== true) {  // ASA-1986 start
-                                console.warn("Skipped block due to invalid block dimensions:", row.block_name);
-                                continue;
-                            }
-                            console.log(
-                                "Created Block:",
-                                row.block_name,
-                                row.color
-                            );
-
-                            // Small delay (render safety)
-                            await new Promise(r => setTimeout(r, 50));
-                        }
-                        if (p_saveColl == "Y") {
-                            var block_details_arr = [];
-                            for (const obj of g_mod_block_list) {
-                                var details = {};
-                                details["BlkColor"] = obj.BlkColor;
-                                details["BlkName"] = obj.BlkName;
-                                details["BlkRule"] = obj.BlkRule;
-                                details["BlkFilters"] = obj.BlockFilters.join(" AND ");
-                                obj["BlkFilters"] = details["BlkFilters"];
-                                block_details_arr.push(details);
-                            }
-                            var retval = await save_blk_dtl_coll('A', 'Blks', block_details_arr);
-                            apex.region("mod_block_details").refresh();
-                            $("#added_attribute").show();
-                            apex.region("added_attribute").refresh();
-                            wpdCaptureShowChangesBlockSnapshot(g_mod_block_list); // ASA-1986
-                        }
-                        console.log("All blocks created");
-
-                        //Resolve when done
-                        resolve(true);
-
-                    } catch (e) {
-                        reject(e);
-                    }
-                },
-
-                error: function (err) {
-                    console.error("AJAX Error:", err);
-                    reject(err);
-                }
-            }
-        );
-
-    });
-}
-
-async function save_af_version() {
-
-    logDebug("function : save_af_verion", "S");
-
-    var l_pog_code = $v('P193_OPEN_POG_CODE');
-    var l_pog_code_version = $v('P193_OPEN_POG_VERSION');
-    var l_open_draft = $v('P193_OPEN_DRAFT');
-    var l_draft_version = $v('P193_EXISTING_DRAFT_VER');
-
-    var mod_tot = 0;
-
-    if (apex.region("mod_block_details") !== null) {
-        var mod_model = apex.region("mod_block_details")
-            .widget()
-            .interactiveGrid("getViews", "grid")
-            .model;
-
-        mod_tot = mod_model.getTotalRecords();
-    }
-
-    if (mod_tot == 0) {
-        alert(get_message('POGCR_BLK_NULL'));
-        return;
-    }
-
-    apex.server.process(
-        "CHECK_AUTOFILL_EXISTS",
-        {
-            x01: l_pog_code,
-            x02: l_pog_code_version,
-            x03: l_open_draft == 'Y' ? l_draft_version : "",
-        },
-        {
-            dataType: "text",
-
-            success: function (pText) {
-
-                pText = $.trim(pText);
-                console.log("Exists Check:", pText);
-
-                if (pText == "YES") {
-
-                    apex.message.confirm(
-                        "Do you want to override the existing version?",
-                        function (okPressed) {
-                            if (okPressed) {
-                                proceed_save('U');
-                            } else {
-                                proceed_save('N');
-                            }
-                        }
-                    );
-
-                }
-                if (pText == "DELETE") {
-                    apex.message.confirm(
-                        "You already have existing blockings.Process to delete oldest version",
-                        function (okPressed) {
-                            if (okPressed) {
-                                proceed_save('D');
-                            } else {
-                                console.log('NO ACTION');
-                            }
-                        }
-                    );
-
-                }
-                if (pText == "OVERIDE") {
-                    apex.message.confirm(
-                        "You already have existing blockings.Do you want to overide?",
-                        function (okPressed) {
-                            if (okPressed) {
-                                proceed_save('O');
-                            } else {
-                                console.log('NO ACTION');
-                            }
-                        }
-                    );
-                }
-                if (pText == "NO") {
-                    proceed_save('S');
-                }
-            }
-        }
-    );
-
-    function proceed_save(p_action) {
-        const l_af_version = getAfVersion();
-        var l_pog_code = $v('P193_OPEN_POG_CODE');
-        var l_pog_code_version = $v('P193_OPEN_POG_VERSION');
-        g_autofill_detail['AFPOGCode'] = l_pog_code;
-        g_autofill_detail['AFPOGVersion'] = l_pog_code_version;
-        g_autofill_detail['AFVersion'] = l_af_version, //$v('P193_AF_VERSION');
-            g_autofill_detail['BlkSelType'] = 'M';
-        g_autofill_detail['AutofillRule'] = $v('P193_AUTOFILL_RULE');
-        g_autofill_detail['BlkInfo'] = g_mod_block_list;
-        var l_open_draft = $v('P193_OPEN_DRAFT');
-        var l_draft_version = $v('P193_EXISTING_DRAFT_VER');
-
-        apex.server.process(
-            "SAVE_AUTOFILL",
-            {
-                x01: g_autofill_detail["AFPOGCode"],
-                x02: $v('P193_AF_VERSION'), //g_autofill_detail["AFVersion"],
-                x03: g_autofill_detail["AutofillRule"],
-                x04: g_autofill_detail["BlkSelType"],
-                x05: g_autofill_detail['AFPOGVersion'],
-                p_clob_01: JSON.stringify(
-                    filterAutoFillJsontag(g_autofill_detail)
-                ),
-                x06: p_action,
-                x07: l_af_version,
-                x08: l_open_draft == 'Y' ? l_draft_version : "",
-            },
-            {
-                dataType: "text",
-
-                success: function (pData) {
-
-                    var return_data = $.trim(pData).split(",");
-                    if (return_data[0] == "ERROR") {
-                        raise_error(pData);
-                    }
-                },
-            }
-        );
-    }
-}
-
-function getAfVersion() {
-    const now = new Date();
-
-    const YYYY = now.getFullYear();
-    const MM = String(now.getMonth() + 1).padStart(2, "0");
-    const DD = String(now.getDate()).padStart(2, "0");
-    const HH = String(now.getHours()).padStart(2, "0");
-    const MI = String(now.getMinutes()).padStart(2, "0");
-    const SS = String(now.getSeconds()).padStart(2, "0");
-
-    return Number(`${YYYY}${MM}${DD}${HH}${MI}${SS}`);
-}
 
 
 
-// Reorder Attributes
-function wpdInitializeAttributeReorder() {
-    const containers = document.querySelectorAll(
-        ".u-tC"
-    );
-    containers.forEach(container => {
-        let draggedChip = null;
-        container.addEventListener("dragstart", function (e) {
-            const chip = e.target.closest(".attr-chip");
-            if (!chip) return;
-            draggedChip = chip;
-            chip.classList.add("dragging");
-        });
-        container.addEventListener("dragend", function (e) {
-            const chip = e.target.closest(".attr-chip");
-            if (!chip) return;
-            chip.classList.remove("dragging");
-            draggedChip = null;
-        });
-        container.addEventListener("dragover", function (e) {
-            e.preventDefault();
-            if (!draggedChip) return;
-            const insertBeforeElement =
-                wpdGetAttributeInsertPosition(container, e.clientY);
-            if (insertBeforeElement == null) {
-                container.appendChild(draggedChip);
-            } else {
-                container.insertBefore(draggedChip, insertBeforeElement);
-            }
-        });
-    });
-}
-function wpdGetAttributeInsertPosition(container, mouseY) {
-    const chips = [
-        ...container.querySelectorAll(".attr-chip:not(.dragging)")
-    ];
-    return chips.reduce((closest, chip) => {
-        const box = chip.getBoundingClientRect();
-        const offset = mouseY - box.top - box.height / 2;
-        if (offset < 0 && offset > closest.offset) {
-            return {
-                offset: offset,
-                element: chip
-            };
-        } else {
-            return closest;
-        }
-    }, {
-        offset: Number.NEGATIVE_INFINITY
-    }).element;
-}
-function wpdCollectAttributeSequence(container) {
-    const chips = container.querySelectorAll(".attr-chip");
-    const sequence = [];
-    chips.forEach((chip, index) => {
-        sequence.push({
-            seq_id: chip.dataset.seq,
-            new_position: index + 1
-        });
-    });
-    return sequence;
-}
-// Initialize
-wpdInitializeAttributeReorder();
-
-async function open_view_analysis() {
-    logDebug("function : open_view_analysis", "S");
-    try {
-        let l_pog_code = g_pog_json[g_pog_index].POGCode;
-        let l_pog_version = g_pog_json[g_pog_index].Version;
-        await show_view_analysis(l_pog_code, l_pog_version);
-    } catch (err) {
-        error_handling(err);
-    } finally {
-        logDebug("function : open_view_analysis", "E");
-    }
-}
-
-
-
-function add_pog_versions() {
+async function add_pog_versions() {
     logDebug("function : add_pog_versions", "S");
     try {
         const select = document.getElementById("top_ver");
@@ -14388,7 +10019,7 @@ async function handle_attribute_change(selectElement) {
         }
         render(g_pog_index);
         g_mod_block_list = [];
-        await createDynamicBlocks($v('P193_OPEN_POG_CODE'), $v('P193_OPEN_DRAFT'), $v('P193_OPEN_POG_VERSION'),$v('P193_EXISTING_DRAFT_VER'), "Y", (selectedValue == 'Default') ? '' : selectedValue);
+        await createDynamicBlocks($v('P193_OPEN_POG_CODE'), $v('P193_OPEN_DRAFT'), $v('P193_OPEN_POG_VERSION'), $v('P193_EXISTING_DRAFT_VER'), "Y", (selectedValue == 'Default') ? '' : selectedValue);
         apex.region("mod_block_details").refresh();
         //await runattrCollections();
         logDebug("function : handle_attribute_change", "E");
@@ -14419,7 +10050,7 @@ async function handle_version_change(selectElement) {
         await auto_fill_setup(0, selectedValue);
         apex.region("mod_block_details").refresh();
         await runattrCollections();
-        wpdCaptureShowChangesBlockSnapshot(g_mod_block_list, "Y"); //ASA-1986 
+        capture_changes_blk_snapshot(g_mod_block_list, "Y"); //ASA-1986 
         logDebug("function : handle_version_change", "E");
 
     } catch (err) {
@@ -14428,141 +10059,22 @@ async function handle_version_change(selectElement) {
     }
 }
 
-// Enabble Context menu on right click
-function onContextMenu(p_event) {
-    logDebug("function : onContextMenu", "S");
-    var valid = "N";
-    if (p_event.target.nodeName == "CANVAS" && g_scene_objects.length > 0) {
-        set_curr_canvas(p_event);
-        g_canvas = p_event.target;
-        g_pog_index = parseInt(g_canvas.getAttribute("data-indx"));
-        g_context_opened = "Y";
-        var is_divider = "N";
-        var canvas_width = 0,
-            border = 0,
-            g_duplicate_fixel_flag = "N";
-        if (g_compare_pog_flag == "Y") {
-            border = 5;
-        }
-        console.log("event", p_event.target, g_pog_index);
-        //getting the canvas bounding area and find out the client x and y where right click was done.
-        var r = g_canvas.getBoundingClientRect();
-        var start_x = r.left;
-        var start_y = r.top;
-        var x = p_event.clientX - r.left;
-        var y = p_event.clientY - r.top;
-        prevX = startX = x;
-        prevY = startY = y;
-        //Pass that to doMouseDown function to find out which object was hit.
-        g_dragging = doMouseDown(x, y, start_x, start_y, p_event, g_canvas, "Y", g_pog_index);
-        console.log("return from MouseDown", g_dragging);
-        console.log("constext ", g_start_canvas, g_ComViewIndex, g_compare_view, g_compare_pog_flag);
-        if (g_carpark_item_flag == "N" && g_carpark_edit_flag == "N" && ((g_start_canvas == g_ComViewIndex && g_compare_view == "POG" && g_compare_pog_flag == "Y") || (g_start_canvas !== g_ComViewIndex && g_compare_pog_flag == "Y") || g_compare_pog_flag == "N")) {
-            p_event.preventDefault();
-            new_details = JSON.parse(JSON.stringify(g_delete_details));
-            for (const objects of new_details) {
-                objects.ShelfInfo = "";
-            }
-            valid = "Y";
-        }
-        //Below block will set the position of the context menu and the submenus for example Edit Facings. according to the mouse right click location.
-        if (valid == "Y") {
-            var header = document.getElementById("t_Header");
-            var breadcrumb = document.getElementById("t_Body_title");
-            var top_bar = document.getElementById("top_bar");
-            var side_nav = document.getElementById("t_Body_nav");
-            var button_cont = document.getElementById("side_bar");
-            var canvas_btn = document.getElementById("maincanvas-btns");
-            var canvas_btn_height = typeof canvas_btn !== "undefined" && canvas_btn !== null ? canvas_btn.offsetHeight : 0;
-            var devicePixelRatio = window.devicePixelRatio;
-            var padding = parseFloat($(".t-Body-contentInner").css("padding-left").replace("px", ""));
 
-            var header_height = header.offsetHeight; // devicePixelRatio;
-            var breadcrumb_height = breadcrumb.offsetHeight; // devicePixelRatio;
-            var top_bar_height = top_bar.offsetHeight; // devicePixelRatio;
-            var side_nav_width = side_nav.offsetWidth; // devicePixelRatio;
-            var btn_cont_width = button_cont.offsetWidth; //devicePixelRatio;
-            var contextElement = document.getElementById("context-menu");
-
-            var inner_width_edit = parseInt(p_event.clientX - $(".t-Region-body").scrollLeft() + contextElement.offsetWidth);
-            var window_width = parseInt($(window).width() - (side_nav_width + btn_cont_width));
-            var inner_width_noedit = parseInt(p_event.clientX - $(".t-Region-body").scrollLeft() + contextElement.offsetWidth);
-
-            //if (event.clientY + contextElement.offsetHeight > window.innerHeight) { beacuse when we click shelf or item from bottom second last shelf its show the context menu not properly in biottom
-            if (p_event.clientY > (window.innerHeight / 2)) { //ASA-1236
-                contextElement.style.top = p_event.clientY - $(document).scrollTop() - contextElement.offsetHeight + "px"; //+ (header_height + breadcrumb_height + top_bar_height + padding) - contextElement.offsetHeight + border + canvas_btn_height + "px";
-            } else {
-                contextElement.style.top = p_event.clientY - $(document).scrollTop() + "px"; //+ (header_height + breadcrumb_height + top_bar_height + padding) + border + canvas_btn_height + "px";
-            }
-
-            if (inner_width_edit > window_width && (g_shelf_edit_flag == "Y" || g_item_edit_flag == "Y")) {
-                contextElement.style.left = p_event.clientX - $(".t-Region-body").scrollLeft() - contextElement.offsetWidth + "px"; // + (side_nav_width + btn_cont_width + padding)) + border - contextElement.offsetWidth + "px";
-            } else if (inner_width_noedit > window_width) {
-                contextElement.style.left = p_event.clientX - $(".t-Region-body").scrollLeft() - contextElement.offsetWidth + "px"; // + (side_nav_width + btn_cont_width + padding)) + border - contextElement.offsetWidth + "px";              
-            }
-            else {
-                contextElement.style.left = p_event.clientX - $(".t-Region-body").scrollLeft() + "px"; // + (side_nav_width + btn_cont_width + padding)) + border + "px";               
-            }
-            console.log("contextElement.style.top", contextElement.style.top, contextElement.style.left, p_event);
-
-            contextElement.classList.add("active");
-        }
-    }
-    logDebug("function : onContextMenu", "E");
-}
-
-async function context_func(p_action) {
-    logDebug("function : context_func; action : " + p_action, "S");
-    if (typeof g_pog_json !== "undefined" && g_pog_json.length > 0) {
-        if (p_action != "copy_pogc_image" && p_action != "zoom_selected_pogc" && g_module_edit_flag == "N" && g_shelf_edit_flag == "N" && g_item_edit_flag == "N" && p_action !== "edit" && g_multiselect !== "Y" && p_action !== "muledit") {
-            alert(get_message("NO_OBJECT_ERROR"));
-        } else {
-            if (p_action == "add") {
-                context_add();
-            } else if (p_action == "delete") {
-                delete_blk_details(g_selected_block);
-            } else if (p_action == "edit") {
-                open_blk_details(g_selected_block, 'Y');
-            }
-        }
-    }
-    g_taskItemInContext = "";
-    g_context_opened = "N";
-    logDebug("function : context_func", "E");
-}
-
-function createAttributeCollection() {
-    return apex.server.process(
-        "CREATE_ATTRIBUTE_COLL",
-        {
-            x01: $v("P193_OPEN_POG_CODE"),
-            x02: $v("P193_AF_VERSION")
-        },
-        {
-            dataType: "text"
-        }
-    );
-}
-
-async function runattrCollections() {
-    try {
-        let pData = await createAttributeCollection();
-
-        $("#added_attribute").show();
-        apex.region("added_attribute").refresh();
-
-        let return_data = $.trim(pData).split(",");
-
-        if (return_data[0] === "ERROR") {
-            raise_error(pData);
-            return;
-        }
-    } catch (err) {
-        console.error(err);
-        raise_error("Server Error");
+// Helper function to keep things clean
+function toggleDisabled(el, shouldDisable) {
+    if (!el) return;
+    var parent = el.parentElement;
+    
+    if (shouldDisable) {
+        parent.classList.add("disabled");
+        el.setAttribute("aria-disabled", "true");
+        el.style.pointerEvents = "none"; // Prevents clicks
+    } else {
+        parent.classList.remove("disabled");
+        el.setAttribute("aria-disabled", "false");
+        el.style.pointerEvents = "auto";  // Re-enables clicks
     }
 }
-
 
 
 function doMouseDown(p_x, p_y, p_startX, p_startY, p_event, p_canvas, p_context_call, p_pog_index) {
@@ -14580,21 +10092,26 @@ function doMouseDown(p_x, p_y, p_startX, p_startY, p_event, p_canvas, p_context_
     try {
         if (g_scene_objects.length > 0) {
             // ASA-1085, x12
+
+
+
             var header = document.getElementById("t_Header");
             var breadcrumb = document.getElementById("t_Body_title");
             var top_bar = document.getElementById("top_bar");
             var side_nav = document.getElementById("t_Body_nav");
-            var button_cont = document.getElementById("side_bar");
+            var button_cont = document.getElementById("wpdSplitter_splitter_first");
+            var wtbar = document.querySelector(".wtbar");
             var devicePixelRatio = window.devicePixelRatio;
             var scroll_top = $(document).scrollTop();
             var scroll_left = $(".t-Region-body").scrollLeft();
-
-            var header_height = header.offsetHeight; // * devicePixelRatio;
-            var breadcrumb_height = breadcrumb.offsetHeight; // * devicePixelRatio;
-            var top_bar_height = top_bar.offsetHeight; //* devicePixelRatio;
-            var side_nav_width = side_nav.offsetWidth; //* devicePixelRatio;
-            var btn_cont_width = button_cont.offsetWidth; //* devicePixelRatio;
             var padding = parseFloat($(".t-Body-contentInner").css("padding-left").replace("px", "")) * devicePixelRatio;
+
+            var header_height = header.offsetHeight;
+            var breadcrumb_height = breadcrumb.offsetHeight;
+            var top_bar_height = top_bar.offsetHeight;
+            var side_nav_width = side_nav.offsetWidth;
+            var btn_cont_width = button_cont.offsetWidth;
+            var wtbar_height = wtbar.offsetHeight;
 
             g_global_counter = g_global_counter + 1;
             g_start_coorX = p_startX;
@@ -14719,7 +10236,7 @@ function doMouseDown(p_x, p_y, p_startX, p_startY, p_event, p_canvas, p_context_
                     }
                     //this vector is used to create a multi select drag box. which will be used when mouse up to find out how many
                     //objects did user select and place all of them in g_delete_details array.
-                   var canvas_rect = p_canvas.getBoundingClientRect();
+                    var canvas_rect = p_canvas.getBoundingClientRect();
                     g_startMouse.x = p_event.clientX - canvas_rect.left + scroll_left;
                     // g_startMouse.y = p_event.clientY + scroll_top - (breadcrumb_height + padding + header_height + top_bar_height);
                     g_startMouse.y = p_event.clientY - canvas_rect.top + scroll_top;
@@ -14727,6 +10244,7 @@ function doMouseDown(p_x, p_y, p_startX, p_startY, p_event, p_canvas, p_context_
                     g_prevMouse.y = p_y;
                     g_nextMouse = g_prevMouse.clone();
                     new_world.remove(g_targetForDragging);
+                    cleanupBlockBorders(p_pog_index);
                     g_intersected = [];
                     g_select_zoom_arr = [];
                     //if ctrl is holded that means duplicate of fixel is in progress.
@@ -14734,6 +10252,7 @@ function doMouseDown(p_x, p_y, p_startX, p_startY, p_event, p_canvas, p_context_
                         var x2 = g_startMouse.x;
                         var y2 = g_startMouse.y;
                         g_selecting = true;
+                        try { clearAutofillBlockHighlight(); } catch (e) { /* ignore */ }
                         g_selection.style.left = g_startMouse.x + "px";
                         g_selection.style.top = g_startMouse.y + "px";
                         g_selection.style.width = x2 - g_startMouse.x + "px";
@@ -14751,8 +10270,10 @@ function doMouseDown(p_x, p_y, p_startX, p_startY, p_event, p_canvas, p_context_
                         return false;
                     }
                 } else {
+                    cleanupBlockBorders(p_pog_index);
                     g_intersected = [];
                     g_select_zoom_arr = [];
+                    try { clearAutofillBlockHighlight(); } catch (e) { /* ignore */ }
                     return false;
                 }
             } else {
@@ -14777,6 +10298,124 @@ function doMouseDown(p_x, p_y, p_startX, p_startY, p_event, p_canvas, p_context_
                         var locationZ = g_intersects[0].point.z;
                         g_drag_z = g_objectHit.position.z;
                     }
+
+
+                    //   try {
+                    //         if (g_block_resize_state && g_block_resize_state.armed && g_selected_block) {
+                    //             var clickedUuid = g_objectHit.uuid || '';
+                    //             // also allow parent uuid if mesh nested
+                    //             var parentUuid = (g_objectHit.parent && g_objectHit.parent.uuid) ? g_objectHit.parent.uuid : '';
+                    //             if (clickedUuid == g_selected_block || parentUuid == g_selected_block) {
+                    //                 // initiate drag-resize
+                    //                 g_block_resize_state.active = true;
+                    //                 g_block_resize_state.armed = false;
+                    //                 g_block_resize_state.startX = g_mousedown_locx;
+                    //                 var blkRef = null;
+                    //                 for (const b of g_mod_block_list) { if (b.BlkName == g_selected_block) { blkRef = b; break; } }
+                    //                 if (blkRef) {
+                    //                     g_block_resize_state.blkRef = blkRef;
+                    //                     g_block_resize_state.startWidth = Number(blkRef.BlockDim && blkRef.BlockDim.BlkWidth ? blkRef.BlockDim.BlkWidth : 0);
+                    //                 }
+                    //                 // ensure cursor indicates resizing
+                    //                 try { $('#maincanvas').css('cursor','ew-resize'); } catch (e) {}
+                    //                 return true;
+                    //             }
+                    //         }
+                    //     } catch (e) {}
+
+                    //  try {
+                    //         if (g_block_resize_state && g_block_resize_state.armed && g_selected_block) {
+                    //             var blkRef = null;
+                    //             for (const b of g_mod_block_list) {
+                    //                 if (b.BlkName == g_selected_block) {
+                    //                     blkRef = b;
+                    //                     break;
+                    //                 }
+                    //             }
+
+                    //             var hitSelectedBlock = false;
+                    //             if (blkRef && blkRef.BlockDim && blkRef.BlockDim.ColorObj) {
+                    //                 var selectedBlockMesh = blkRef.BlockDim.ColorObj.getObjectByProperty("uuid", g_selected_block);
+                    //                 if (selectedBlockMesh) {
+                    //                     var selectedBlockHits = g_raycaster.intersectObject(selectedBlockMesh, true);
+                    //                     hitSelectedBlock = Array.isArray(selectedBlockHits) && selectedBlockHits.length > 0;
+                    //                 }
+                    //             }
+
+                    //             if (hitSelectedBlock) {
+                    //                 // initiate drag-resize
+                    //                 g_block_resize_state.active = true;
+                    //                 g_block_resize_state.armed = false;
+                    //                 g_block_resize_state.startX = g_mousedown_locx;
+                    //                 if (blkRef) {
+                    //                     g_block_resize_state.blkRef = blkRef;
+                    //                     g_block_resize_state.startWidth = Number(blkRef.BlockDim && blkRef.BlockDim.BlkWidth ? blkRef.BlockDim.BlkWidth : 0);
+                    //                 }
+                    //                 // ensure cursor indicates resizing
+                    //                 try { $('#maincanvas').css('cursor','ew-resize'); } catch (e) {}
+                    //                 return true;
+                    //             }
+                    //         }
+                    //     } catch (e) {}
+
+
+                    try {
+                        if (g_block_resize_state && g_block_resize_state.armed && g_selected_block) {
+                            var blkRef = null;
+                            for (const b of g_mod_block_list) {
+                                if (b.BlkName == g_selected_block) {
+                                    blkRef = b;
+                                    break;
+                                }
+                            }
+
+                            var hitSelectedBlock = false;
+                            var hitEdge = null;
+                            var startPointerLocalX = 0;
+                            if (blkRef && blkRef.BlockDim && blkRef.BlockDim.ColorObj) {
+                                var selectedBlockMesh = blkRef.BlockDim.ColorObj.getObjectByProperty("uuid", g_selected_block);
+                                if (selectedBlockMesh) {
+                                    var selectedBlockHits = g_raycaster.intersectObject(selectedBlockMesh, true);
+                                    hitSelectedBlock = Array.isArray(selectedBlockHits) && selectedBlockHits.length > 0;
+                                    if (hitSelectedBlock) {
+                                        var hitPt = selectedBlockHits[0].point.clone();
+                                        blkRef.BlockDim.ColorObj.worldToLocal(hitPt);
+                                        startPointerLocalX = Number(hitPt.x);
+                                        var blkWidth = Number(blkRef.BlockDim.BlkWidth || 0);
+                                        var blkCalcX = Number(blkRef.BlockDim.CalcX || 0);
+                                        var leftX = blkCalcX - blkWidth / 2;
+                                        var rightX = blkCalcX + blkWidth / 2;
+                                        var edgeTolerance = Math.max(0.06, blkWidth * 0.08);
+                                        if (Math.abs(startPointerLocalX - leftX) <= edgeTolerance) {
+                                            hitEdge = "left";
+                                        } else if (Math.abs(startPointerLocalX - rightX) <= edgeTolerance) {
+                                            hitEdge = "right";
+                                        }
+                                    }
+                                }
+                            }
+
+                            if (hitSelectedBlock && hitEdge) {
+                                // initiate drag-resize
+                                g_block_resize_state.active = true;
+                                g_block_resize_state.armed = false;
+                                g_block_resize_state.startX = g_mousedown_locx;
+                                g_block_resize_state.edge = hitEdge;
+                                g_block_resize_state.hoverEdge = hitEdge;
+                                g_block_resize_state.startPointerLocalX = startPointerLocalX;
+                                if (blkRef) {
+                                    g_block_resize_state.blkRef = blkRef;
+                                    g_block_resize_state.startWidth = Number(blkRef.BlockDim && blkRef.BlockDim.BlkWidth ? blkRef.BlockDim.BlkWidth : 0);
+                                    g_block_resize_state.startCalcX = Number(blkRef.BlockDim && blkRef.BlockDim.CalcX ? blkRef.BlockDim.CalcX : 0);
+                                    g_block_resize_state.startLeft = g_block_resize_state.startCalcX - g_block_resize_state.startWidth / 2;
+                                    g_block_resize_state.startRight = g_block_resize_state.startCalcX + g_block_resize_state.startWidth / 2;
+                                }
+                                // ensure cursor indicates resizing
+                                try { $('#maincanvas').css('cursor', 'ew-resize'); } catch (e) { }
+                                return true;
+                            }
+                        }
+                    } catch (e) { }
 
                     var coords = new THREE.Vector3(locationX, locationY, locationZ);
                     new_world.worldToLocal(coords);
@@ -14888,9 +10527,15 @@ function doMouseDown(p_x, p_y, p_startX, p_startY, p_event, p_canvas, p_context_
                                     }
                                 }
                             }
+                            cleanupBlockBorders(p_pog_index);
                             g_intersected = [];
                             g_select_zoom_arr = [];
                             g_intersected.push(g_objectHit);
+                            try {
+                                if (typeof g_modify_resize_enabled !== "undefined" && g_modify_resize_enabled) {
+                                    positionResizerFor(g_objectHit);
+                                }
+                            } catch (e) { }
                         } else if (p_event.altKey == true) {
                             g_select_zoom_arr.push(g_objectHit);
                             g_intersected.push(g_objectHit);
@@ -15025,18 +10670,19 @@ function doMouseDown(p_x, p_y, p_startX, p_startY, p_event, p_canvas, p_context_
                         //its hit object is module or base or notch dont allow to drag.
                     } else if (g_module_edit_flag == "Y" || g_module_obj_array.indexOf(g_objectHit) !== -1 || g_objectHit_uuid.match(/BASE.*/) || g_objectHit_uuid.match(/NOTCH.*/)) {
                         //if ctrl key is pressed and object hit is module then module to be duplicated.
-                        if (g_auto_fill_active == "N") {
-                            //ASA-1085 added autofill condition
-                            if (p_event.ctrlKey && g_module_edit_flag == "Y") {
-                                context_copy("S", p_pog_index);
-                                g_duplicating = "Y";
-                            } else if (p_event.ctrlKey && g_item_edit_flag == "Y") {
-                                context_copy("S", p_pog_index);
-                                g_duplicating = "Y";
-                                g_dupShelfDepth = g_pog_json[p_pog_index].ModuleInfo[g_module_index].ShelfInfo[g_shelf_index].D;
-                            }
-                        }
-                        else if (g_auto_fill_active == "Y" && g_mod_block_list.length > 0) {
+                        // if (g_auto_fill_active == "N") {
+                        //     //ASA-1085 added autofill condition
+                        //     if (p_event.ctrlKey && g_module_edit_flag == "Y") {
+                        //         context_copy("S", p_pog_index);
+                        //         g_duplicating = "Y";
+                        //     } else if (p_event.ctrlKey && g_item_edit_flag == "Y") {
+                        //         context_copy("S", p_pog_index);
+                        //         g_duplicating = "Y";
+                        //         g_dupShelfDepth = g_pog_json[p_pog_index].ModuleInfo[g_module_index].ShelfInfo[g_shelf_index].D;
+                        //     }
+                        // }
+                        // else  g_auto_fill_active == "Y" &&
+                         if ( g_mod_block_list.length > 0) {
                             //     for (colorObj of g_mod_block_list) {
                             //         if (colorObj.mod_index[0] == g_module_index) {
                             //             var fnTop = colorObj.BlockDim.FinalTop;
@@ -15061,8 +10707,8 @@ function doMouseDown(p_x, p_y, p_startX, p_startY, p_event, p_canvas, p_context_
                                             var mesh = coloredModule.getObjectByProperty("uuid", uid);
                                             if (!mesh) return false;
                                             var hits = g_raycaster.intersectObject(mesh, true);
-
-                                            return hits && hits.length > 0;
+                                            g_drag_inprogress = "N"
+                                            return hits && hits.length === 1 || hits.length === 2;
                                         }
                                     }
                                 } catch (e) {
@@ -15070,6 +10716,7 @@ function doMouseDown(p_x, p_y, p_startX, p_startY, p_event, p_canvas, p_context_
                                 }
                                 return false;
                             };
+
 
                             for (colorObj of g_mod_block_list) {
                                 if (colorObj.mod_index[0] == g_module_index) {
@@ -15081,17 +10728,33 @@ function doMouseDown(p_x, p_y, p_startX, p_startY, p_event, p_canvas, p_context_
                                         g_selected_block = objUuid;
                                         console.log("block name", g_selected_block);
                                         // try { highlightAutofillBlock(objUuid, p_pog_index); } catch (e) { console.warn(e); }
-                                       var isLeftClick = true;
-                                        try {
-                                            if (typeof p_event !== 'undefined' && typeof p_event.button !== 'undefined') {
-                                                isLeftClick = (p_event.button === 0);
+                                        //    var isLeftClick = true;
+                                        //     try {
+                                        //         if (typeof p_event !== 'undefined' && typeof p_event.button !== 'undefined') {
+                                        //             isLeftClick = (p_event.button === 0);
+                                        //         }
+                                        //     } catch (e) {}
+                                        var isLeftClick = false;
+
+                                        if (p_event) {
+
+                                            if (p_event.button === 0) {
+                                                isLeftClick = true;
                                             }
-                                        } catch (e) {}
+
+                                            else if (p_event.buttons === 1) {
+                                                isLeftClick = true;
+                                            }
+
+                                            else if (p_event.which === 1) {
+                                                isLeftClick = true;
+                                            }
+                                        }
                                         var hitIsModule = (typeof g_module_obj_array !== 'undefined' && g_module_obj_array.indexOf(g_objectHit) !== -1);
                                         if (isLeftClick && hitIsModule) {
-                                            try { highlightAutofillBlock(objUuid, p_pog_index); } catch(e) { console.warn(e); }
+                                            try { highlightAutofillBlock(objUuid, p_pog_index); } catch (e) { console.warn(e); }
                                         } else {
-                                            try { clearAutofillBlockHighlight(); } catch(e) { /* ignore */ }
+                                            try { clearAutofillBlockHighlight(); } catch (e) { /* ignore */ }
                                         }
                                         g_dragItem = coloredModule.getObjectByProperty("uuid", objUuid);
                                         return true;
@@ -15104,8 +10767,8 @@ function doMouseDown(p_x, p_y, p_startX, p_startY, p_event, p_canvas, p_context_
                         g_multiselect is only allow when mousedown happened on module or outside POG.
                          */
                         if (g_context_opened == "N") {
-                          
-                           var canvas_rect = p_canvas.getBoundingClientRect();
+
+                            var canvas_rect = p_canvas.getBoundingClientRect();
                             g_startMouse.x = p_event.clientX - canvas_rect.left + scroll_left;
                             // g_startMouse.y = p_event.clientY + scroll_top - (breadcrumb_height + padding + header_height + top_bar_height);
                             g_startMouse.y = p_event.clientY - canvas_rect.top + scroll_top;
@@ -15141,11 +10804,15 @@ function doMouseDown(p_x, p_y, p_startX, p_startY, p_event, p_canvas, p_context_
                                 clearInterval(g_myVar);
                                 g_select_color = 0x000000;
                                 render(g_pog_index);
+                                cleanupBlockBorders(p_pog_index);
                                 g_intersected = [];
                                 g_select_zoom_arr = [];
                             }
                             g_select_zoom_arr.push(g_objectHit);
-                            g_intersected.push(g_objectHit);
+                            // g_intersected.push(g_objectHit);
+                            if (typeof g_module_obj_array === 'undefined' || g_module_obj_array.indexOf(g_objectHit) === -1) {
+                                g_intersected.push(g_objectHit);
+                            }
                             if (g_pog_index == g_ComViewIndex && g_module_edit_flag == "Y" && typeof comp_obj_id !== "undefined") {
                                 var selectedObject = g_scene_objects[g_ComViewIndex].scene.children[2].getObjectById(comp_obj_id);
                                 if (typeof selectedObject !== "undefined") {
@@ -15176,7 +10843,7 @@ function doMouseDown(p_x, p_y, p_startX, p_startY, p_event, p_canvas, p_context_
                         g_dragItem = g_objectHit;
                         if (g_chest_move == "N" && g_shelf_object_type == "CHEST" && g_shelf_edit_flag == "Y" && g_chest_as_pegboard == "Y") {
                             //ASA-1300
-                           
+
                             var canvas_rect = p_canvas.getBoundingClientRect();
                             g_startMouse.x = p_event.clientX - canvas_rect.left + scroll_left;
                             // g_startMouse.y = p_event.clientY + scroll_top - (breadcrumb_height + padding + header_height + top_bar_height);
@@ -15281,6 +10948,7 @@ function doMouseDown(p_x, p_y, p_startX, p_startY, p_event, p_canvas, p_context_
                         clearInterval(g_myVar);
                         g_select_color = 0x000000;
                         render(g_pog_index);
+                        cleanupBlockBorders(p_pog_index);
                         g_intersected = [];
                         g_select_zoom_arr = [];
                     }
@@ -15295,129 +10963,8 @@ function doMouseDown(p_x, p_y, p_startX, p_startY, p_event, p_canvas, p_context_
 
 
 
-async function context_delete(p_action, p_moduleIndex, p_shelfIndex, p_itemIndex, p_item_edit_flag, p_module_edit_flag, p_shelf_edit_flag, p_objectHitID, p_shelfObjType, p_delete_details_arr, p_camera, p_pog_index, p_productselect) {
-    logDebug("function : context_delete; action : " + p_action + "; moduleIndex : " + p_moduleIndex + "; shelfIndex : " + p_shelfIndex + "; itemIndex : " + p_itemIndex + "; i_item_edit_flag : " + p_item_edit_flag + "; i_module_edit_flag : " + p_module_edit_flag + "; i_shelf_edit_flag : " + p_shelf_edit_flag + "; objectHitID : " + p_objectHitID + "; shelfObjType : " + p_shelfObjType, "S");
-    try {
-        var is_divider = "N";
-        var deleteModule = p_module_edit_flag;
-        //when delete is clicked.
-        if (p_action == "DELETE") {
-            //we get list of objects to be deleted.
-            if (p_delete_details_arr.multi_carpark_ind !== "Y") {
-                await get_delist_item(p_pog_index, g_multiselect, p_shelfIndex, p_moduleIndex, p_itemIndex, p_shelf_edit_flag, p_module_edit_flag, p_item_edit_flag, p_delete_details_arr);
-            }
-            if (typeof p_delete_details_arr !== "undefined" && p_delete_details_arr.length > 0) {
-                deleteModule = "N";
-            }
-            //delete those objects.
-            await deleteObject(p_pog_index, p_delete_details_arr, p_productselect, deleteModule, p_moduleIndex, "U");
-            if (p_module_edit_flag == "Y" && g_manual_zoom_ind == "N") {
-                var details = get_min_max_xy(p_pog_index);
-                var details_arr = details.split("###");
-                set_camera_z(p_camera, parseFloat(details_arr[2]), parseFloat(details_arr[3]), parseFloat(details_arr[0]), parseFloat(details_arr[1]), g_offset_z, parseFloat(details_arr[4]), parseFloat(details_arr[5]), true, p_pog_index);
-                render(p_pog_index);
-            }
-        } else {
-            // Action = "CUT"
-            var isDivider = "N";
-            var shelfdtl = g_pog_json[p_pog_index].ModuleInfo[g_module_index].ShelfInfo[g_shelf_index];
-            if (g_carpark_item_flag == "N" && p_itemIndex !== -1) {
-                isDivider = shelfdtl.ItemInfo[p_itemIndex].Item;
-            }
-            if (p_module_edit_flag == "Y") {
-                delete_module(p_objectHitID, p_moduleIndex, p_camera, p_pog_index);
-            } else if (p_shelf_edit_flag == "Y" || (p_item_edit_flag == "Y" && isDivider == "DIVIDER")) {
-                if (p_item_edit_flag == "Y" && isDivider == "DIVIDER") {
-                    is_divider = "Y";
-                }
-                p_shelfObjType = shelfdtl.ObjType;
-                delete_shelf(p_objectHitID, p_moduleIndex, p_shelfIndex, p_itemIndex, p_shelfObjType, is_divider, "N", p_pog_index);
-            } else if (p_item_edit_flag == "Y" && isDivider !== "DIVIDER") {
-                delete_item(p_objectHitID, p_moduleIndex, p_shelfIndex, p_itemIndex, p_action, "Y", p_pog_index);
-            }
-        }
-        if (g_show_live_image == "Y") {
-            animate_pog(p_pog_index);
-        }
-        //recreate the orientation view if any present
-        var returnval = await recreate_compare_views(g_compare_view, "N");
-        logDebug("function : context_delete", "E");
-    } catch (err) {
-        error_handling(err);
-    }
-}
-
-
-async function deleteObject(p_pog_index, p_deleteDetailsArr, p_productListOpen, p_deleteModule = "N", p_moduleIndex = -1, p_undoType) {
-    logDebug("function : deleteObject; p_pog_index : " + p_pog_index + "; pProductListOpen : " + p_productListOpen + "; pDeleteModule : " + p_deleteModule + "; pModuleIndex : " + p_moduleIndex, "S");
-    try {
-        g_mselect_drag = "N";
-        var deleteShelf = "N";
-        if (p_deleteModule !== "Y") {
-            var deleteItem = "N";
-            var objecttype = "";
-
-            for (const objects of p_deleteDetailsArr) {
-                if (objects.Object !== objecttype && objecttype !== "") {
-                    deleteItem = "Y";
-                }
-                objecttype = objects.Object;
-                if (objects.Object == "SHELF") {
-                    deleteShelf = "Y";
-                }
-            }
-            if (deleteItem == "Y" && deleteShelf == "Y") {
-                //Task_29818 - Start
-                // ax_message.set({
-                //     labels: {
-                //         ok: get_message("SHCT_YES"),
-                //         cancel: get_message("SHCT_NO"),
-                //     },
-                // });
-
-                // ax_message.set({
-                //     buttonReverse: true,
-                // });
-                // ax_message.confirm(get_message("ITEM_FIXEL_DELETE"), async function (e) {
-                //     if (e) {
-                //         await deleteObjectLib(p_pog_index, deleteShelf, p_deleteDetailsArr, p_productListOpen, "N", -1, "");
-                //     } else {
-                //         deleteShelf = "N";
-                //         await deleteObjectLib(p_pog_index, deleteShelf, p_deleteDetailsArr, p_productListOpen, "N", -1, "");
-                //     }
-                // });
-
-                confirm(
-                    get_message("ITEM_FIXEL_DELETE"),
-                    get_message("SHCT_YES"),
-                    get_message("SHCT_NO"),
-                    async function () {
-                        await deleteObjectLib(p_pog_index, deleteShelf, p_deleteDetailsArr, p_productListOpen, "N", -1, "");
-                    },
-                    async function () {
-                        deleteShelf = "N";
-                        await deleteObjectLib(p_pog_index, deleteShelf, p_deleteDetailsArr, p_productListOpen, "N", -1, "");
-                    }
-                );
-                //Task_29818 - End
-            } else {
-                await deleteObjectLib(p_pog_index, deleteShelf, p_deleteDetailsArr, p_productListOpen, "N", -1, "");
-            }
-        } else {
-            await deleteObjectLib(p_pog_index, deleteShelf, p_deleteDetailsArr, p_productListOpen, "Y", p_moduleIndex, p_undoType);
-        }
-
-        g_delete_details = [];
-        g_multi_drag_shelf_arr = [];
-        g_multi_drag_item_arr = [];
-        logDebug("function : deleteObject", "E");
-    } catch (err) {
-        error_handling(err);
-    }
-}
-
-
 async function find_highlight_frame() {
+    logDebug("function : find_highlight_frame", "S");
     try {
         if (!Array.isArray(g_scene_objects) || g_scene_objects.length === 0) return [];
         const removed = [];
@@ -15475,9 +11022,408 @@ async function find_highlight_frame() {
                 clearFrame(pogIdx);
             }
         }
+        logDebug("function : find_highlight_frame", "E");
         return removed;
     } catch (err) {
         error_handling(err);
     }
-    
+
 }
+
+const randomColor = () => {
+    return (
+        "#" +
+        Math.floor(Math.random() * 16777215)
+            .toString(16)
+            .padStart(6, "0")
+            .toUpperCase());
+};
+
+
+async function load_data(pFileIndex) {
+    logDebug("function : load_data", "S");
+    try {        
+        var fileInputElem = document.getElementById("P193_IMPORT_TEMPLATE");
+        var file = fileInputElem.files[pFileIndex];
+        var reader = new FileReader();
+        reader.onload = (function (pFile) {
+            return function (e) {
+                if (pFile) {
+                    var base64 = binaryArray2base64(e.target.result);
+                    var f01Array = [];
+                    f01Array = clob2Array(base64, 30000, f01Array);
+                    apex.server.process(
+                        "IMPORT_BLOCKS", {
+                        x01: file.name,
+                        x02: file.type,
+                        x03: $v('P193_OPEN_POG_CODE'),
+                        x04: $v('P193_OPEN_POG_VERSION'),
+                        x05: $v('P193_OPEN_DRAFT') == 'Y' ? $v('P193_EXISTING_DRAFT_VER') : '',
+                        f01: f01Array,
+                    }, {
+                        dataType: "json",
+                        success: async function (data) {
+                            console.log(data.error_flag);
+                            if (data.error_flag === "Y") {
+                                closeInlineDialog("FILE_UPLOAD");
+                                apex.navigation.redirect("f?p=" + $v("pFlowId") + ":193:" + $v("pInstance") + ":APPLICATION_PROCESS=EXPORT_ERROR_TEMPLATE:&DEBUG.");
+                                raise_error(get_message("IMPORT_RECORD_FAILURE"));
+                                return;
+                            } 
+                            // Case 1: If server returned an array (module list)
+                            if (Array.isArray(data)) {
+                                closeInlineDialog("FILE_UPLOAD");
+                                for (const obj of g_mod_block_list) {
+                                    for (const child of obj.BlockDim.ColorObj.children) {
+                                        if (child.uuid == obj.BlkName) {
+                                            obj.BlockDim.ColorObj.remove(child);
+                                            break;
+                                        }
+                                    }
+                                }
+                                render(g_pog_index);
+                                g_mod_block_list = [];
+                                for (const row of data) {
+
+                                    // Create start/end coords
+                                    g_DragMouseStart = {
+                                        x: Number(row.x1),
+                                        y: Number(row.y1)
+                                    };
+
+                                    g_DragMouseEnd = {
+                                        x: Number(row.x2),
+                                        y: Number(row.y2)
+                                    };
+
+                                    console.log(
+                                        "Start:", g_DragMouseStart,
+                                        "End:", g_DragMouseEnd
+                                    );
+                                    [
+                                        g_autofillModInfo,
+                                        g_autofillShelfInfo
+                                    ] = getAutofillModShelf(
+                                        g_DragMouseStart,
+                                        g_DragMouseEnd,
+                                        g_pog_json,
+                                        g_pog_index
+                                    );
+                                    var isBlockCreated = await setAutofillBlock(
+                                        'A',
+                                        row.block_name,
+                                        'N',
+                                        'N',
+                                        row.color,
+                                        row.values
+                                    );
+                                    if (isBlockCreated !== true) {
+                                        console.warn("Skipped block due to invalid block dimensions:", row.block_name);
+                                        continue;
+                                    }
+                                    console.log(
+                                        "Created Block:",
+                                        row.block_name,
+                                        row.color
+                                    );
+
+                                    // Small delay (render safety)
+                                    await new Promise(r => setTimeout(r, 50));
+                                }
+                                var block_details_arr = [];
+                                for (const obj of g_mod_block_list) {
+                                    var details = {};
+                                    details["BlkColor"] = obj.BlkColor;
+                                    details["BlkName"] = obj.BlkName;
+                                    details["BlkRule"] = obj.BlkRule;
+                                    details["BlkShelfInfo"] = obj.BlkShelfInfo;
+                                    details["BlkFilters"] = obj.BlockFilters.join(" AND ");
+                                    obj["BlkFilters"] = details["BlkFilters"];
+                                    block_details_arr.push(details);
+                                }
+                                var retval = await save_blk_dtl_coll('A', 'Blks', block_details_arr);
+                                apex.region("mod_block_details").refresh();
+                                $("#added_attribute").show();
+                                apex.region("added_attribute").refresh();
+                                capture_changes_blk_snapshot(g_mod_block_list);
+
+                                return;
+                            }                            
+                            if (data.result !== "success") {
+                                closeInlineDialog("FILE_UPLOAD");
+                                apex.message.clearErrors();
+
+                                apex.message.showErrors([{
+                                    type: "error",
+                                    location: ["page"],
+                                    message: data.error || "Unknown error",
+                                    unsafe: false
+                                }]);
+                            }
+                        }
+                        //         if (data.result == "success") {
+                        //             g_itemInfoFileIndex = 0;
+                        //                 fileInputElem.value = "";
+                        //                 if (data.error_flag == "Y") {
+                        //                     closeInlineDialog("FILE_UPLOAD");
+                        //                     // apex.navigation.redirect("f?p=&APP_ID.:&APP_PAGE_ID.:&APP_SESSION.:APPLICATION_PROCESS=EXPORT_ITEM_REGMOV_ON_ERROR:&DEBUG.");
+                        //                     // raise_error(get_message("IMPORT_RECORD_FAILURE"));
+                        //                 } else {
+                        //                     alert('tst'); 
+                        //                 }
+                        //         } else {
+                        //             apex.message.clearErrors();
+
+                        //             apex.message.showErrors([{
+                        //                 type: "error",
+                        //                 location: ["page"],
+                        //                 message: data.error,
+                        //                 unsafe: false,
+                        //             },
+                        //             ]);
+                        //         }
+                        //     }
+                        ,
+                        loadingIndicatorPosition: "page",
+                    });
+                }
+            };
+        })(file);
+        reader.readAsArrayBuffer(file);
+    } catch (err) {
+        error_handling(err);
+    }
+    logDebug("function : load_data", "E");
+}
+
+//ASA-1422
+//this function is used when click shelf and select any 2 product and we find out the area between and multi select objects in between them
+//after this it will work similarly like drag multi select.
+function multiSelectItemsWithShift(p_pog_index, p_offset_perc) {
+    try {
+        logDebug("function : multiSelectItemsWithShift; p_pog_index : " + p_pog_index + "; p_offset_perc : " + p_offset_perc, "S");
+        var startX,
+            startY,
+            endX,
+            endY,
+            carpark_object = "CARPARK_ITEM",
+            carparkIntersect = "N",
+            fLeft,
+            fRight,
+            fBottom,
+            fTop,
+            lLeft,
+            lRight,
+            lBottom,
+            lTop;
+        if (!$.isEmptyObject(g_shift_multi_item_last)) {
+            g_delete_details = [];
+            g_multi_drag_shelf_arr = [];
+            g_multi_drag_item_arr = [];
+            carparkIntersect = g_shift_multi_item_first.isCarpark == "Y" || g_shift_multi_item_last.isCarpark == "Y" ? "Y" : "N";
+
+            fTop = g_shift_multi_item_first.Y + g_shift_multi_item_first.H / 2;
+            fRight = g_shift_multi_item_first.X + g_shift_multi_item_first.W / 2;
+            fBottom = g_shift_multi_item_first.Y - g_shift_multi_item_first.H / 2;
+            fLeft = g_shift_multi_item_first.X - g_shift_multi_item_first.W / 2;
+
+            lTop = g_shift_multi_item_last.Y + g_shift_multi_item_last.H / 2;
+            lRight = g_shift_multi_item_last.X + g_shift_multi_item_last.W / 2;
+            lBottom = g_shift_multi_item_last.Y - g_shift_multi_item_last.H / 2;
+            lLeft = g_shift_multi_item_last.X - g_shift_multi_item_last.W / 2;
+
+            startX = Math.min(fLeft, lLeft);
+            startY = Math.max(fTop, lTop);
+            endX = Math.max(fRight, lRight);
+            endY = Math.min(fBottom, lBottom);
+
+            var j = 0;
+            for (const module of g_pog_json[p_pog_index].ModuleInfo) {
+                if (module.ParentModule == null || module.ParentModule == "undefined") {
+                    var k = 0;
+                    for (const shelf of module.ShelfInfo) {
+                        if (typeof shelf !== "undefined") {
+                            if (shelf.ObjType !== "NOTCH" && shelf.ObjType !== "BASE" && shelf.ObjType !== "DIVIDER" && shelf.ObjType !== "TEXTBOX") {
+                                var l = 0;
+                                for (const item of shelf.ItemInfo) {
+                                    var itemTop = item.Y + item.H / 2,
+                                        itemLeft = item.X - item.W / 2,
+                                        itemBottom = item.Y - item.H / 2,
+                                        itemRight = item.X + item.W / 2;
+                                    if (
+                                        (itemTop <= startY && itemRight <= endX && itemBottom >= endY && itemLeft >= startX) ||
+                                        (p_offset_perc > 0 && ((itemTop > startY && itemRight <= endX && itemBottom >= endY && itemLeft >= startX && startY > itemBottom && (startY - itemBottom) / item.H >= p_offset_perc / 100) || (itemTop <= startY && itemRight > endX && itemBottom >= endY && itemLeft >= startX && endX > itemLeft && (endX - itemLeft) / item.W >= p_offset_perc / 100) || (itemTop <= startY && itemRight <= endX && itemBottom < endY && itemLeft >= startX && endY < itemTop && (itemTop - endY) / item.H >= p_offset_perc / 100) || (itemTop <= startY && itemRight <= endX && itemBottom >= endY && itemLeft < startX && startX < itemRight && (itemRight - startX) / item.W >= p_offset_perc / 100) || (itemTop > startY && itemRight <= endX && itemBottom < endY && itemLeft >= startX && (startY - endY) / item.H >= p_offset_perc / 100) || (itemTop <= startY && itemRight > endX && itemBottom >= endY && itemLeft < startX && (endX - startX) / item.W >= p_offset_perc / 100) || (itemTop > startY && startY > itemBottom && itemRight > endX && endX > itemLeft && itemBottom >= endY && itemLeft >= startX && (endX - itemLeft) / item.W >= p_offset_perc / 100 && (startY - itemBottom) / item.H >= p_offset_perc / 100) || (itemTop <= startY && itemRight <= endX && itemLeft < startX && startX < itemRight && itemBottom < endY && endY < itemTop && (itemTop - endY) / item.H >= p_offset_perc / 100 && (itemRight - startX) / item.W >= p_offset_perc / 100) || (itemTop <= startY && itemBottom < endY && endY < itemTop && itemRight > endX && endX > itemLeft && itemLeft >= startX && (itemTop - endY) / item.H >= p_offset_perc / 100 && (endX - itemLeft) / item.W >= p_offset_perc / 100) || (itemTop > startY && startY > itemBottom && itemBottom >= endY && itemRight <= endX && startX < itemRight && itemLeft < startX && (itemRight - startX) / item.W >= p_offset_perc / 100 && (startY - itemBottom) / item.H >= p_offset_perc / 100)))
+                                    ) {
+                                        //ASA-1422 issue 2
+                                        var is_divider = "N";
+                                        var object = "ITEM";
+                                        if (item.Item == "DIVIDER") {
+                                            is_divider = "Y";
+                                            object = "SHELF";
+                                        }
+                                        var details = setDetailsArray(item.ObjID, j, k, item.W, item.H, item.X, item.Y, item.Z, l, shelf.ObjType, is_divider, object, module.MObjID, shelf.SObjID, item.ItemID, item.Item, "N", 0, 0, item.Distance, item.TopObjID, item.BottomObjID, g_start_canvas, g_present_canvas, p_pog_index);
+                                        details["W"] = item.W;
+                                        details["RW"] = item.RW;
+                                        details["H"] = item.H;
+                                        details["X"] = item.X;
+                                        details["Y"] = item.Y;
+                                        g_delete_details.multi_delete_shelf_ind = "";
+                                        g_delete_details.push(details);
+                                    }
+                                    l++;
+                                }
+                            }
+                        }
+                        k++;
+                    }
+                    if (carparkIntersect == "Y") {
+                        var Carpark = module.Carpark;
+                        if (typeof Carpark !== "undefined" && Carpark.length > 0) {
+                            var l = 0;
+                            for (const item of module.Carpark[0].ItemInfo) {
+                                var itemTop = item.Y + item.H / 2,
+                                    itemLeft = item.X + item.W / 2,
+                                    itemBottom = item.Y - item.H / 2,
+                                    itemRight = item.X - item.W / 2;
+                                if (
+                                    (itemTop <= startY && itemRight <= endX && itemBottom >= endY && itemLeft >= startX) ||
+                                    (p_offset_perc > 0 && ((itemTop > startY && itemRight <= endX && itemBottom >= endY && itemLeft >= startX && startY > itemBottom && (startY - itemBottom) / item.H >= p_offset_perc / 100) || (itemTop <= startY && itemRight > endX && itemBottom >= endY && itemLeft >= startX && endX > itemLeft && (endX - itemLeft) / item.W >= p_offset_perc / 100) || (itemTop <= startY && itemRight <= endX && itemBottom < endY && itemLeft >= startX && endY < itemTop && (itemTop - endY) / item.H >= p_offset_perc / 100) || (itemTop <= startY && itemRight <= endX && itemBottom >= endY && itemLeft < startX && startX < itemRight && (itemRight - startX) / item.W >= p_offset_perc / 100) || (itemTop > startY && itemRight <= endX && itemBottom < endY && itemLeft >= startX && (startY - endY) / item.H >= p_offset_perc / 100) || (itemTop <= startY && itemRight > endX && itemBottom >= endY && itemLeft < startX && (endX - startX) / item.W >= p_offset_perc / 100) || (itemTop > startY && startY > itemBottom && itemRight > endX && endX > itemLeft && itemBottom >= endY && itemLeft >= startX && (endX - itemLeft) / item.W >= p_offset_perc / 100 && (startY - itemBottom) / item.H >= p_offset_perc / 100) || (itemTop <= startY && itemRight <= endX && itemLeft < startX && startX < itemRight && itemBottom < endY && endY < itemTop && (itemTop - endY) / item.H >= p_offset_perc / 100 && (itemRight - startX) / item.W >= p_offset_perc / 100) || (itemTop <= startY && itemBottom < endY && endY < itemTop && itemRight > endX && endX > itemLeft && itemLeft >= startX && (itemTop - endY) / item.H >= p_offset_perc / 100 && (endX - itemLeft) / item.W >= p_offset_perc / 100) || (itemTop > startY && startY > itemBottom && itemBottom >= endY && itemRight <= endX && startX < itemRight && itemLeft < startX && (itemRight - startX) / item.W >= p_offset_perc / 100 && (startY - itemBottom) / item.H >= p_offset_perc / 100)))
+                                ) {
+                                    //ASA-1422 issue 2
+                                    var details = setDetailsArray(item.ObjID, j, 0, item.W, item.H, item.X, item.Y, item.Z, l, Carpark.ObjType, "N", carpark_object, module.MObjID, Carpark.SObjID, item.ItemID, item.Item, "N", 0, 0, item.Distance, item.TopObjID, item.BottomObjID, g_start_canvas, g_present_canvas, p_pog_index);
+                                    details["W"] = items.W;
+                                    details["RW"] = items.RW;
+                                    details["H"] = items.H;
+                                    details["X"] = items.X;
+                                    details["Y"] = items.Y;
+                                    details["IsCarpark"] = "Y";
+                                    g_delete_details.multi_delete_shelf_ind = "";
+                                    g_delete_details.multi_carpark_ind = "Y";
+                                    g_delete_details.push(details);
+                                }
+                                l++;
+                            }
+                        }
+                    }
+                }
+                j++;
+            }
+            g_delete_details.StartCanvas = g_start_canvas;
+            g_delete_details.g_present_canvas = g_present_canvas;
+            if (g_delete_details.multi_carpark_ind == "Y") {
+                if (g_delete_details.some((e) => e.Object !== carpark_object)) {
+                    //Task_29818 - Start
+                    // ax_message.set({
+                    //     labels: {
+                    //         ok: get_message("SHCT_YES"),
+                    //         cancel: get_message("SHCT_NO"),
+                    //     },
+                    // });
+
+                    // ax_message.set({
+                    //     buttonReverse: true,
+                    // });
+
+                    // ax_message.confirm(get_message("CARPARK_MULTI_SEL_CONF"), function (e) {
+                    //     if (e) {
+                    //         for (var i = g_delete_details.length - 1; i >= 0; --i) {
+                    //             if (g_delete_details[i].Object !== carpark_object) {
+                    //                 g_delete_details.splice(i, 1);
+                    //             }
+                    //         }
+                    //         set_multi_blink(g_pog_json, p_pog_index);
+                    //     } else {
+                    //         g_delete_details = [];
+                    //         set_multi_blink(g_pog_json, p_pog_index);
+                    //     }
+                    // });
+
+                    confirm(
+                        get_message("CARPARK_MULTI_SEL_CONF"),
+                        get_message("SHCT_YES"),
+                        get_message("SHCT_NO"),
+                        function () {
+                            for (var i = g_delete_details.length - 1; i >= 0; --i) {
+                                if (g_delete_details[i].Object !== carpark_object) {
+                                    g_delete_details.splice(i, 1);
+                                }
+                            }
+                            set_multi_blink(g_pog_json, p_pog_index);
+                        },
+                        function () {
+                            g_delete_details = [];
+                            set_multi_blink(g_pog_json, p_pog_index);
+                        }
+                    );
+                    //Task_29818 - End
+                }
+            }
+            if (g_delete_details.length > 0) {
+                g_multiselect = "Y";
+                g_mselect_drag = "Y";
+                g_intersected = [];
+                if (typeof g_delete_details !== "undefined") {
+                    $.each(g_delete_details, function (j, details) {
+                        var selectedObject = g_scene_objects[p_pog_index].scene.children[2].getObjectById(details.ObjID);
+                        g_intersected.push(selectedObject);
+                    });
+                    render_animate_selected();
+                }
+            }
+        }
+        logDebug("function : multiSelectItemsWithShift", "E");
+    } catch (err) {
+        error_handling(err);
+    }
+}
+
+
+async function create_all_pog_onload(p_pog_json) {
+    logDebug("function : create_all_pog_onload", "S");
+    g_pog_index = 0;
+    g_multi_pog_json = [];
+    // addLoadingIndicator(); //ASA-1500
+    g_canvas_objects = [];
+    if (p_pog_json.length > 1) {
+        $("#pog_list_btn").css("display", "block");
+        $("#chng_view_btn").css("display", "block");
+        $(".add_pog").css("display", "block");
+        $(".open_par").css("display", "block"); //ASA-1587
+    }
+    g_multi_pog_json = [];
+    appendMultiCanvasRowCol(p_pog_json.length, $v("P193_POGCR_TILE_VIEW"));
+    switchCanvasView($v("P193_POGCR_TILE_VIEW"), "Y"); // Task-22510
+
+    for (var p = 0; p <= p_pog_json.length - 1; p++) {
+        g_pog_index = p;
+        init(p);
+        objects = {};
+        objects["scene"] = g_scene;
+        objects["renderer"] = g_renderer;
+        g_json = [p_pog_json[p]]; //vivek
+        g_scene_objects.push(objects);
+        set_indicator_objects(p);
+        var return_val = await create_module_from_json(p_pog_json, sessionStorage.getItem("new_pog_ind"), "F", $v("P193_PRODUCT_BTN_CLICK"), sessionStorage.getItem("pog_opened"), "N", "N", "Y", "Y", "", "N", g_scene_objects[p].scene.children[0], g_scene_objects[p].scene, g_pog_index, p);
+        var canvas_id = g_canvas_objects[p].getAttribute("id");
+        $("#" + canvas_id + "-btns").append('<span id="block_title" style="float:left">' + g_pog_json[p].POGCode + "</span>"); //HOTFIX
+    }
+
+     await auto_fill_setup(0);
+        if (!g_mod_block_list || g_mod_block_list.length === 0) { //Garit
+            await createDynamicBlocks($v('P193_OPEN_POG_CODE'), $v('P193_OPEN_DRAFT'), $v('P193_OPEN_POG_VERSION'), $v('P193_EXISTING_DRAFT_VER'));
+        } else {
+            apex.region("mod_block_details").refresh();
+            $("#added_attribute").show();
+            apex.region("added_attribute").refresh();
+        }
+        await runattrCollections();
+        await add_pog_versions();
+
+    var retval = await render_all_pog();
+    setPogActive(g_pog_index);
+    // removeLoadingIndicator(regionloadWait);//ASA-1500
+    g_pog_json = g_multi_pog_json;
+    logDebug("function : create_all_pog_onload", "E");
+}
+
+

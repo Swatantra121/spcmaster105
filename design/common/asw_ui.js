@@ -682,3 +682,51 @@ function reset_indicators() {
     }
     logDebug("function : reset_indicators", "E");
 }
+
+
+//This function is only used in "Where is it" screen and calling for each POG in loop. file (asw_common_additional.js)
+function init_lib(p_renderer_ind, p_event_ind, p_window_evnt_ind, p_pog_index) {
+    try {
+        g_canvas_region = document.getElementById("drawing_region");
+        g_selection = document.getElementById("selection");
+        if (p_renderer_ind == "Y") {
+            g_renderer = new THREE.WebGLRenderer({
+                canvas: g_canvas, //g_canvas variable is already set from getelementbyid in page 27
+                antialias: true,
+                preserveDrawingBuffer: true,
+            });
+        }
+
+        g_canvas_objects.push(g_canvas); //This array is used to hold all canvas when multiple pog opened in WPD.
+    } catch (e) {
+        document.getElementById("canvas-holder").innerHTML = "<p><b>Sorry, an error occurred:<br>" + e + "</b></p>";
+        return;
+    }
+    createWorld(); //This function creats scene and camera and populate g_scene_objects array.
+    g_raycaster = new THREE.Raycaster(); //This is a method that will trace the world object that hit on any specific point. to get the world coordinates.
+    render(0);
+    var devicePixelRatio = window.devicePixelRatio;
+    g_start_pixel_ratio = devicePixelRatio;
+    var windowWidth = window.innerWidth;
+    g_windowHeight = window.innerHeight;
+    if (p_event_ind == "Y") {
+        //Mouse events are assigned to specific dom element events: mousedown, mousemove, mouseup, mousedoubleclick
+        setUpMouseHander("maincanvas", doMouseMove, doMouseDown, doMouseUp, g_renderer, p_pog_index);
+    }
+    g_tanFOV = Math.tan(((Math.PI / 180) * g_camera.fov) / 2);
+    g_initial_windowHeight = window.innerHeight;
+    g_camera.aspect = windowWidth / g_windowHeight;
+
+    // adjust the FOV based on the window height to fit the canvas inside the window.
+    g_camera.fov = (360 / Math.PI) * Math.atan(g_tanFOV * (g_windowHeight / g_initial_windowHeight));
+
+    g_camera.updateProjectionMatrix();
+    g_renderer.setSize(windowWidth, g_windowHeight);
+    render(0);
+    if (p_window_evnt_ind == "Y") {
+        //This even set to recreate the POG when browser is zoom in or out. based on new size the POG will be recreated.
+        window.addEventListener("resize", onWindowResize_lib, false);
+    }
+    //We call this function which will only recreate any pog if the devicepixelratio of previous veiw is changed.
+    onWindowResize_lib("F");
+}

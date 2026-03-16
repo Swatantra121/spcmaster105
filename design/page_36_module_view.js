@@ -2093,8 +2093,6 @@ console.log('error 3', return_val);
 //End ASA-1371_26842
 //Start ASA-1371_26842
 function open_module(pog_module) {
-    debugger
-
     var mod_rec;
     $s('P36_POG_MODULE', pog_module);   //ASA-1537 #9
     if (l_selected_mod !== pog_module) {
